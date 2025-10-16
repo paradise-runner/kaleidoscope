@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -12,11 +13,74 @@ import (
 	tmux "github.com/jubnzv/go-tmux"
 )
 
+// identifier composes the current folder (repo) + branch + task + first selected model
+func (m model) identifier() string {
+	cwd, err := os.Getwd()
+	repo := ""
+	if err == nil {
+		repo = filepath.Base(cwd)
+	}
+	branch := strings.TrimSpace(m.branch)
+	task := strings.TrimSpace(m.task)
+	// pick first selected model for current provider
+	modelName := ""
+	p := m.currentProvider()
+	if sel := m.selected[p]; sel != nil {
+		for _, name := range m.models[p] {
+			if sel[name] {
+				modelName = name
+				break
+			}
+		}
+	}
+	parts := []string{}
+	if repo != "" {
+		parts = append(parts, repo)
+	}
+	if branch != "" {
+		parts = append(parts, branch)
+	}
+	if task != "" {
+		parts = append(parts, task)
+	}
+	if modelName != "" {
+		parts = append(parts, modelName)
+	}
+	return strings.Join(parts, "-")
+}
+
+// identifierFor composes repo + branch + task + provided model name
+func (m model) identifierFor(modelName string) string {
+	cwd, err := os.Getwd()
+	repo := ""
+	if err == nil {
+		repo = filepath.Base(cwd)
+	}
+	branch := strings.TrimSpace(m.branch)
+	task := strings.TrimSpace(m.task)
+	modelName = strings.TrimSpace(modelName)
+	parts := []string{}
+	if repo != "" {
+		parts = append(parts, repo)
+	}
+	if branch != "" {
+		parts = append(parts, branch)
+	}
+	if task != "" {
+		parts = append(parts, task)
+	}
+	if modelName != "" {
+		parts = append(parts, modelName)
+	}
+	return strings.Join(parts, "_")
+}
+
 // focusType indicates which input is focused
 type focusType int
 
 const (
 	focusBranch focusType = iota
+	focusTask
 	focusPrompt
 	focusProvider
 	focusModels
@@ -24,7 +88,7 @@ const (
 
 // model holds state for the TUI
 // - multi-line prompt with cursor
-// - single-line branch name
+// - single-line branch name and task name
 // // - provider dropdown
 // - models multi-select dropdown (depends on provider) and selections
 // - sizes and focus control
@@ -42,6 +106,10 @@ type model struct {
 	// Branch name (single line)
 	branch       string
 	branchCursor int
+
+	// Task name (single line)
+	task       string
+	taskCursor int
 
 	// Provider dropdown
 	providers     []string
@@ -72,6 +140,7 @@ func initialModel() model {
 	m := model{
 		input:         []string{""},
 		branch:        "",
+		task:          "",
 		providers:     []string{"Github", "OpenAI"},
 		providerIndex: 0,
 		providerOpen:  false,
@@ -112,9 +181,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyTab, tea.KeyShiftTab:
-			// Cycle focus among branch -> prompt -> provider -> models -> branch
+			// Cycle focus among branch -> task -> prompt -> provider -> models -> branch
 			switch m.focus {
 			case focusBranch:
+				m.focus = focusTask
+			case focusTask:
 				m.focus = focusPrompt
 			case focusPrompt:
 				m.focus = focusProvider
@@ -129,7 +200,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case tea.KeyEnter:
-			if m.focus == focusBranch {
+			if m.focus == focusBranch || m.focus == focusTask {
 				m.focus = focusPrompt
 				return m, nil
 			}
@@ -165,7 +236,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == focusPrompt {
 				models := m.selectedModels()
 				if len(models) > 0 {
-					return m, openPanesCmd(models)
+					return m, openPanesCmd(models, m)
 				}
 			}
 
@@ -196,6 +267,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.branchCursor++
 				return m, nil
 			}
+			if m.focus == focusTask {
+				m.task = m.task[:m.taskCursor] + " " + m.task[m.taskCursor:]
+				m.taskCursor++
+				return m, nil
+			}
 			if m.focus == focusPrompt {
 				line := m.input[m.cursor.row]
 				m.input[m.cursor.row] = line[:m.cursor.col] + " " + line[m.cursor.col:]
@@ -207,6 +283,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.branchCursor > 0 && len(m.branch) > 0 {
 					m.branch = m.branch[:m.branchCursor-1] + m.branch[m.branchCursor:]
 					m.branchCursor--
+				}
+				return m, nil
+			}
+			if m.focus == focusTask {
+				if m.taskCursor > 0 && len(m.task) > 0 {
+					m.task = m.task[:m.taskCursor-1] + m.task[m.taskCursor:]
+					m.taskCursor--
 				}
 				return m, nil
 			}
@@ -242,6 +325,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			if m.focus == focusTask {
+				if m.taskCursor > 0 {
+					m.taskCursor--
+				}
+				return m, nil
+			}
 			// no left/right in provider/models lists; fall through to prompt
 			if m.cursor.col > 0 {
 				m.cursor.col--
@@ -253,6 +342,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == focusBranch {
 				if m.branchCursor < len(m.branch) {
 					m.branchCursor++
+				}
+				return m, nil
+			}
+			if m.focus == focusTask {
+				if m.taskCursor < len(m.task) {
+					m.taskCursor++
 				}
 				return m, nil
 			}
@@ -318,6 +413,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.branchCursor += len(r)
 					return m, nil
 				}
+				if m.focus == focusTask {
+					m.task = m.task[:m.taskCursor] + r + m.task[m.taskCursor:]
+					m.taskCursor += len(r)
+					return m, nil
+				}
 				if m.focus == focusProvider || m.focus == focusModels {
 					// ignore text input for dropdowns
 					return m, nil
@@ -377,18 +477,39 @@ func (m model) View() string {
 	cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
 	branchInner := bLeft + cursor + bRight
 
+	// Render task single-line with cursor
+	tline := m.task
+	if m.taskCursor > len(tline) {
+		m.taskCursor = len(tline)
+	}
+	tLeft := tline[:m.taskCursor]
+	tRight := tline[m.taskCursor:]
+	taskInner := tLeft + cursor + tRight
+
 	branchBorder := lipgloss.Color("#6BCB77")
 	if m.focus == focusBranch {
 		branchBorder = lipgloss.Color("#4D96FF")
+	}
+	// task border highlights when focused
+	taskBorder := lipgloss.Color("#6BCB77")
+	if m.focus == focusTask {
+		taskBorder = lipgloss.Color("#4D96FF")
 	}
 	branchBox := lipgloss.NewStyle().
 		Width(branchWidth).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(branchBorder).
 		Padding(0, 2)
+	// task box shares width with branch box
+	taskBox := lipgloss.NewStyle().
+		Width(branchWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(taskBorder).
+		Padding(0, 2)
 
 	branchLabel := lipgloss.NewStyle().Faint(true).Render("branch-name")
-	branchView := branchLabel + "\n" + branchBox.Render(branchInner)
+	taskLabel := lipgloss.NewStyle().Faint(true).Render("task-name")
+	branchView := branchLabel + "\n" + branchBox.Render(branchInner) + "\n\n" + taskLabel + "\n" + taskBox.Render(taskInner)
 
 	// Render prompt buffer with block cursor
 	var pb strings.Builder
@@ -803,10 +924,9 @@ type panesOpenedMsg struct {
 }
 
 // openPanesCmd splits the current tmux window once per model and tiles layout
-func openPanesCmd(models []string) tea.Cmd {
+func openPanesCmd(models []string, m model) tea.Cmd {
 	return func() tea.Msg {
 		if !tmux.IsInsideTmux() {
-			// Best effort: notify via tmux if available in PATH
 			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot open panes"})
 			return panesOpenedMsg{0, fmt.Errorf("not inside tmux")}
 		}
@@ -819,13 +939,22 @@ func openPanesCmd(models []string) tea.Cmd {
 		origPaneID := strings.TrimSpace(paneOut)
 
 		opened := 0
-		for range models {
-			// split vertically; users can adjust later
-			if _, _, err := tmux.RunCmd([]string{"split-window", "-v"}); err != nil {
-				return panesOpenedMsg{opened, err}
+		var lastErr error
+		for _, name := range models {
+			id := m.identifierFor(name)
+			// Use split-window to run the git commands in the new pane directly.
+			// Request the new pane id with -P -F "#{pane_id}" so we can target it if needed.
+			bashCmd := fmt.Sprintf("git worktree add -b '%s' ../%s || true; cd ../%s; exec $SHELL", id, id, id)
+			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
+			if err != nil {
+				lastErr = err
+				// continue attempting remaining panes
+				continue
 			}
+			_ = out
 			opened++
 		}
+
 		// Arrange panes nicely
 		_, _, _ = tmux.RunCmd([]string{"select-layout", "tiled"})
 
@@ -835,7 +964,7 @@ func openPanesCmd(models []string) tea.Cmd {
 		// Inform in tmux status line
 		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Opened %d pane(s)", opened)})
 
-		return panesOpenedMsg{opened, nil}
+		return panesOpenedMsg{opened, lastErr}
 	}
 }
 
