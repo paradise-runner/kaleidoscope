@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	tmux "github.com/jubnzv/go-tmux"
 )
 
 // focusType indicates which input is focused
@@ -159,6 +160,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input = append(m.input[:m.cursor.row+1], append([]string{after}, m.input[m.cursor.row+1:]...)...)
 			m.cursor.row++
 			m.cursor.col = 0
+
+			// Also, spawn a tmux pane per selected model
+			if m.focus == focusPrompt {
+				models := m.selectedModels()
+				if len(models) > 0 {
+					return m, openPanesCmd(models)
+				}
+			}
+
 		case tea.KeySpace:
 			// Space toggles selection when in models multiselect and open.
 			if m.focus == focusModels && m.modelsOpen {
@@ -768,6 +778,65 @@ func hexToRGB(h string) (int, int, int) {
 	g, _ := strconv.ParseInt(h[2:4], 16, 64)
 	b, _ := strconv.ParseInt(h[4:6], 16, 64)
 	return int(r), int(g), int(b)
+}
+
+// selectedModels returns selected model names for the current provider
+func (m model) selectedModels() []string {
+	p := m.currentProvider()
+	sel := m.selected[p]
+	var out []string
+	if sel == nil {
+		return out
+	}
+	for _, name := range m.models[p] {
+		if sel[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// panesOpenedMsg reports how many panes were opened and any error
+type panesOpenedMsg struct {
+	count int
+	err   error
+}
+
+// openPanesCmd splits the current tmux window once per model and tiles layout
+func openPanesCmd(models []string) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			// Best effort: notify via tmux if available in PATH
+			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot open panes"})
+			return panesOpenedMsg{0, fmt.Errorf("not inside tmux")}
+		}
+
+		// Capture the current pane id to restore focus later
+		paneOut, _, err := tmux.RunCmd([]string{"display-message", "-p", "#{pane_id}"})
+		if err != nil {
+			return panesOpenedMsg{0, err}
+		}
+		origPaneID := strings.TrimSpace(paneOut)
+
+		opened := 0
+		for range models {
+			// split vertically; users can adjust later
+			if _, _, err := tmux.RunCmd([]string{"split-window", "-v"}); err != nil {
+				return panesOpenedMsg{opened, err}
+			}
+			opened++
+		}
+		// Arrange panes nicely
+		_, _, _ = tmux.RunCmd([]string{"select-layout", "tiled"})
+
+		// Restore focus to the original pane
+		_, _, _ = tmux.RunCmd([]string{"select-pane", "-t", origPaneID})
+
+		// Inform in tmux status line
+		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Opened %d pane(s)", opened)})
+
+		return panesOpenedMsg{opened, nil}
+	}
 }
 
 func main() {
