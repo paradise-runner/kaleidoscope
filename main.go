@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -553,33 +555,219 @@ func (m model) renderSelectedColumn(width int) string {
 }
 
 func rainbowHeader(width int) string {
-	word := strings.ToUpper("Kaleidoscope")
-	// Add spaces between letters so it feels bigger
-	spaced := strings.Join(strings.Split(word, ""), " ")
-	colors := []lipgloss.Color{
-		lipgloss.Color("#FF6B6B"),
-		lipgloss.Color("#F7B801"),
-		lipgloss.Color("#6BCB77"),
-		lipgloss.Color("#4D96FF"),
-		lipgloss.Color("#B967FF"),
-	}
+	lines := bigBlockKALEIDOSCOPE()
 
-	var colored strings.Builder
-	idx := 0
-	for _, ch := range spaced {
-		if ch == ' ' {
-			colored.WriteRune(' ')
-			continue
+	// Determine the widest line to size our gradient
+	maxCols := 0
+	for _, ln := range lines {
+		if l := len([]rune(ln)); l > maxCols {
+			maxCols = l
 		}
-		c := colors[idx%len(colors)]
-		colored.WriteString(lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(ch)))
-		idx++
+	}
+	if maxCols == 0 {
+		return ""
 	}
 
-	title := colored.String()
-	// Make it appear "bigger" by duplicating the line
-	line := lipgloss.PlaceHorizontal(width, lipgloss.Center, title)
-	return line + "\n" + line
+	// Color stops for a pleasant rainbow sweep (left → right)
+	stops := []string{
+		"#4D96FF", // blue
+		"#6BCB77", // green
+		"#F7B801", // yellow
+		"#FF6B6B", // coral
+		"#B967FF", // violet
+	}
+	palette := gradientColors(maxCols, stops)
+
+	var out strings.Builder
+	// Add vertical spacing above the banner
+	out.WriteString("\n\n\n")
+	for _, ln := range lines {
+		var row strings.Builder
+		cols := []rune(ln)
+		for i, r := range cols {
+			if r == ' ' {
+				row.WriteRune(' ')
+				continue
+			}
+			c := lipgloss.Color(palette[i])
+			row.WriteString(lipgloss.NewStyle().Bold(true).Foreground(c).Render(string(r)))
+		}
+		centered := lipgloss.PlaceHorizontal(width, lipgloss.Center, row.String())
+		out.WriteString(centered)
+		out.WriteString("\n")
+	}
+	// Add matching vertical spacing below the banner
+	out.WriteString("\n\n\n")
+	return out.String()
+}
+
+// bigBlockKALEIDOSCOPE returns a blocky ASCII banner for "KALEIDOSCOPE".
+// Each string is one row; characters are built from '█' and spaces.
+func bigBlockKALEIDOSCOPE() []string {
+	font := map[rune][]string{
+		'A': {
+			"  ██   ",
+			" █  █  ",
+			"█    █ ",
+			"██████ ",
+			"█    █ ",
+			"█    █ ",
+			"█    █ ",
+		},
+		'C': {
+			" ████  ",
+			"█      ",
+			"█      ",
+			"█      ",
+			"█      ",
+			"█      ",
+			" ████  ",
+		},
+		'D': {
+			"█████  ",
+			"█   █  ",
+			"█    █ ",
+			"█    █ ",
+			"█    █ ",
+			"█   █  ",
+			"█████  ",
+		},
+		'E': {
+			"██████ ",
+			"█      ",
+			"█      ",
+			"█████  ",
+			"█      ",
+			"█      ",
+			"██████ ",
+		},
+		'I': {
+			"██████ ",
+			"  █    ",
+			"  █    ",
+			"  █    ",
+			"  █    ",
+			"  █    ",
+			"██████ ",
+		},
+		'K': {
+			"█   █  ",
+			"█  █   ",
+			"█ █    ",
+			"██     ",
+			"█ █    ",
+			"█  █   ",
+			"█   █  ",
+		},
+		'L': {
+			"█      ",
+			"█      ",
+			"█      ",
+			"█      ",
+			"█      ",
+			"█      ",
+			"██████ ",
+		},
+		'O': {
+			" ████  ",
+			"█    █ ",
+			"█    █ ",
+			"█    █ ",
+			"█    █ ",
+			"█    █ ",
+			" ████  ",
+		},
+		'P': {
+			"█████  ",
+			"█   █  ",
+			"█   █  ",
+			"█████  ",
+			"█      ",
+			"█      ",
+			"█      ",
+		},
+		'S': {
+			" █████ ",
+			"█      ",
+			"█      ",
+			" ████  ",
+			"     █ ",
+			"     █ ",
+			"█████  ",
+		},
+	}
+
+	word := "KALEIDOSCOPE"
+	// Height from any glyph
+	glyph := font['A']
+	height := len(glyph)
+	lines := make([]string, height)
+	for row := 0; row < height; row++ {
+		var b strings.Builder
+		for _, ch := range word {
+			g, ok := font[ch]
+			if !ok {
+				// Fallback to blanks roughly the width of an 'A'
+				b.WriteString("       ")
+				b.WriteString("  ")
+				continue
+			}
+			b.WriteString(g[row])
+			b.WriteString("  ") // gap between letters
+		}
+		lines[row] = b.String()
+	}
+	return lines
+}
+
+// gradientColors creates a width-sized palette interpolating across the given
+// hex color stops (e.g., ["#ff0000", "#00ff00", "#0000ff"]).
+func gradientColors(width int, stops []string) []string {
+	if width < 1 {
+		return nil
+	}
+	if len(stops) == 0 {
+		stops = []string{"#FFFFFF", "#FFFFFF"}
+	}
+	if len(stops) == 1 {
+		stops = append(stops, stops[0])
+	}
+
+	nSeg := len(stops) - 1
+	res := make([]string, width)
+	for i := 0; i < width; i++ {
+		pos := float64(i) / float64(width-1)
+		seg := int(pos * float64(nSeg))
+		if seg >= nSeg {
+			seg = nSeg - 1
+		}
+		segStart := float64(seg) / float64(nSeg)
+		segEnd := float64(seg+1) / float64(nSeg)
+		t := 0.0
+		if segEnd > segStart {
+			t = (pos - segStart) / (segEnd - segStart)
+		}
+
+		r1, g1, b1 := hexToRGB(stops[seg])
+		r2, g2, b2 := hexToRGB(stops[seg+1])
+
+		r := int(math.Round((1-t)*float64(r1) + t*float64(r2)))
+		g := int(math.Round((1-t)*float64(g1) + t*float64(g2)))
+		b := int(math.Round((1-t)*float64(b1) + t*float64(b2)))
+		res[i] = fmt.Sprintf("#%02X%02X%02X", r, g, b)
+	}
+	return res
+}
+
+func hexToRGB(h string) (int, int, int) {
+	h = strings.TrimPrefix(h, "#")
+	if len(h) != 6 {
+		return 255, 255, 255
+	}
+	r, _ := strconv.ParseInt(h[0:2], 16, 64)
+	g, _ := strconv.ParseInt(h[2:4], 16, 64)
+	b, _ := strconv.ParseInt(h[4:6], 16, 64)
+	return int(r), int(g), int(b)
 }
 
 func main() {
