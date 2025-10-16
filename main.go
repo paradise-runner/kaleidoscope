@@ -129,19 +129,19 @@ type model struct {
 
 func initialModel() model {
 	mods := map[string][]string{
-		"Github": {"sonnet-4.5", "gpt-5", "gemini-2.5"},
-		"OpenAI": {"gpt-5", "gpt-5-codex", "gpt-5-mini"},
+		"github-copilot": {"claude-sonnet-4.5", "gpt-5", "gemini-2.5"},
+		"OpenAI":         {"gpt-5", "gpt-5-codex", "gpt-5-mini"},
 	}
 	// initialize empty selections per provider
 	sel := map[string]map[string]bool{
-		"Github": {},
-		"OpenAI": {},
+		"github-copilot": {},
+		"OpenAI":         {},
 	}
 	m := model{
 		input:         []string{""},
 		branch:        "",
 		task:          "",
-		providers:     []string{"Github", "OpenAI"},
+		providers:     []string{"github-copilot", "OpenAI"},
 		providerIndex: 0,
 		providerOpen:  false,
 		providerHover: 0,
@@ -944,7 +944,15 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 			id := m.identifierFor(name)
 			// Use split-window to run the git commands in the new pane directly.
 			// Request the new pane id with -P -F "#{pane_id}" so we can target it if needed.
-			bashCmd := fmt.Sprintf("git worktree add -b '%s' ../%s || true; cd ../%s; exec $SHELL", id, id, id)
+			// Build command: add worktree, cd into it, then run opencode with provider/model and prompt
+			shellQuote := func(s string) string {
+				return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+			}
+			provider := m.currentProvider()
+			prompt := strings.Join(m.input, "\n")
+			modelFull := provider + "/" + name
+			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s || true; cd ../%s; opencode run -m %s %s; exec $SHELL",
+				shellQuote(id), shellQuote(id), shellQuote(id), shellQuote(modelFull), shellQuote(prompt))
 			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
 			if err != nil {
 				lastErr = err
