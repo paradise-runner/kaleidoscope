@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -125,11 +126,14 @@ type model struct {
 
 	// Focus
 	focus focusType
+
+	// Run command to execute after opencode
+	runCmd string
 }
 
-func initialModel() model {
+func initialModel(runCmd string) model {
 	mods := map[string][]string{
-		"github-copilot": {"claude-sonnet-4.5", "gpt-5", "gemini-2.5"},
+		"github-copilot": {"claude-sonnet-4.5", "gpt-5-mini", "claude-haiku-4.5"},
 		"OpenAI":         {"gpt-5", "gpt-5-codex", "gpt-5-mini"},
 	}
 	// initialize empty selections per provider
@@ -150,6 +154,7 @@ func initialModel() model {
 		modelsOpen:    false,
 		modelsHover:   0,
 		focus:         focusPrompt,
+		runCmd:        runCmd,
 	}
 	return m
 }
@@ -951,8 +956,8 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 			provider := m.currentProvider()
 			prompt := strings.Join(m.input, "\n")
 			modelFull := provider + "/" + name
-			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s || true; cd ../%s; opencode run -m %s %s; exec $SHELL",
-				shellQuote(id), shellQuote(id), shellQuote(id), shellQuote(modelFull), shellQuote(prompt))
+			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s || true; cd ../%s; opencode run -m %s %s; %s; exec $SHELL",
+				shellQuote(id), shellQuote(id), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), m.runCmd)
 			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
 			if err != nil {
 				lastErr = err
@@ -977,7 +982,16 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 }
 
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	run := flag.String("run", "", "run command (required)")
+	flag.Parse()
+
+	if *run == "" {
+		fmt.Fprintln(os.Stderr, "Error: --run flag is required")
+		flag.PrintDefaults()
+		os.Exit(1)
+	}
+
+	p := tea.NewProgram(initialModel(*run), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
