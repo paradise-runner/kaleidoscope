@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -936,6 +937,19 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 			return panesOpenedMsg{0, fmt.Errorf("not inside tmux")}
 		}
 
+		// Create feature branch first
+		branchName := strings.TrimSpace(m.branch)
+		if branchName == "" {
+			return panesOpenedMsg{0, fmt.Errorf("branch name is required")}
+		}
+
+		// Try to create the branch; if it already exists, just check it out
+		cmd := exec.Command("git", "checkout", "-b", branchName)
+		cmd.Run()
+		// Ignore errors - branch may already exist, in which case we'll checkout to it
+		cmd = exec.Command("git", "checkout", branchName)
+		cmd.Run()
+
 		// Capture the current pane id to restore focus later
 		paneOut, _, err := tmux.RunCmd([]string{"display-message", "-p", "#{pane_id}"})
 		if err != nil {
@@ -949,15 +963,15 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 			id := m.identifierFor(name)
 			// Use split-window to run the git commands in the new pane directly.
 			// Request the new pane id with -P -F "#{pane_id}" so we can target it if needed.
-			// Build command: add worktree, cd into it, then run opencode with provider/model and prompt
+			// Build command: add worktree from feature branch in parent directory, cd into it, then run opencode with provider/model and prompt
 			shellQuote := func(s string) string {
 				return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 			}
 			provider := m.currentProvider()
 			prompt := strings.Join(m.input, "\n")
 			modelFull := provider + "/" + name
-			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s || true; cd ../%s; opencode run -m %s %s; %s; exec $SHELL",
-				shellQuote(id), shellQuote(id), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), m.runCmd)
+			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s %s || true; cd ../%s; opencode run -m %s %s; %s; exec $SHELL",
+				shellQuote(id), shellQuote(id), shellQuote(branchName), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), m.runCmd)
 			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
 			if err != nil {
 				lastErr = err
