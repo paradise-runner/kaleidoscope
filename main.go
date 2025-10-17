@@ -88,6 +88,14 @@ const (
 	focusModels
 )
 
+// screenType indicates which screen is displayed
+type screenType int
+
+const (
+	screenSetup screenType = iota
+	screenIteration
+)
+
 // model holds state for the TUI
 // - multi-line prompt with cursor
 // - single-line branch name and task name
@@ -128,6 +136,21 @@ type model struct {
 	// Focus
 	focus focusType
 
+	// Screen
+	screen screenType
+
+	// Iteration screen command prompt
+	iterationInput  []string
+	iterationCursor struct {
+		row int
+		col int
+	}
+
+	// Autocomplete state
+	autocompleteOptions []string
+	autocompleteIndex   int
+	autocompleteActive  bool
+
 	// Run command to execute after opencode
 	runCmd string
 }
@@ -143,19 +166,21 @@ func initialModel(runCmd string) model {
 		"OpenAI":         {},
 	}
 	m := model{
-		input:         []string{""},
-		branch:        "",
-		task:          "",
-		providers:     []string{"github-copilot", "OpenAI"},
-		providerIndex: 0,
-		providerOpen:  false,
-		providerHover: 0,
-		models:        mods,
-		selected:      sel,
-		modelsOpen:    false,
-		modelsHover:   0,
-		focus:         focusPrompt,
-		runCmd:        runCmd,
+		input:          []string{""},
+		branch:         "",
+		task:           "",
+		providers:      []string{"github-copilot", "OpenAI"},
+		providerIndex:  0,
+		providerOpen:   false,
+		providerHover:  0,
+		models:         mods,
+		selected:       sel,
+		modelsOpen:     false,
+		modelsHover:    0,
+		focus:          focusPrompt,
+		screen:         screenSetup,
+		iterationInput: []string{""},
+		runCmd:         runCmd,
 	}
 	return m
 }
@@ -179,10 +204,18 @@ func (m model) providerModels() []string {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case panesOpenedMsg:
+		if msg.err == nil && msg.count > 0 {
+			m.screen = screenIteration
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 	case tea.KeyMsg:
+		if m.screen == screenIteration {
+			return m.updateIteration(msg)
+		}
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
@@ -437,7 +470,220 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC, tea.KeyEsc:
+		return m, tea.Quit
+	case tea.KeyTab:
+		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
+			m.autocompleteIndex = (m.autocompleteIndex + 1) % len(m.autocompleteOptions)
+		} else {
+			line := m.iterationInput[m.iterationCursor.row]
+			prefix, _ := m.getAutocompletePrefix(line, m.iterationCursor.col)
+			if prefix != "" {
+				m.autocompleteOptions = m.getAutocompleteOptions(prefix)
+				if len(m.autocompleteOptions) > 0 {
+					m.autocompleteActive = true
+					m.autocompleteIndex = 0
+				}
+			}
+		}
+	case tea.KeyEnter:
+		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
+			line := m.iterationInput[m.iterationCursor.row]
+			prefix, start := m.getAutocompletePrefix(line, m.iterationCursor.col)
+			if prefix != "" {
+				completion := m.autocompleteOptions[m.autocompleteIndex]
+				newLine := line[:start] + completion + line[m.iterationCursor.col:]
+				m.iterationInput[m.iterationCursor.row] = newLine
+				m.iterationCursor.col = start + len(completion)
+			}
+			m.autocompleteActive = false
+			m.autocompleteOptions = nil
+		} else {
+			before := m.iterationInput[m.iterationCursor.row][:m.iterationCursor.col]
+			after := m.iterationInput[m.iterationCursor.row][m.iterationCursor.col:]
+			m.iterationInput[m.iterationCursor.row] = before
+			m.iterationInput = append(m.iterationInput[:m.iterationCursor.row+1], append([]string{after}, m.iterationInput[m.iterationCursor.row+1:]...)...)
+			m.iterationCursor.row++
+			m.iterationCursor.col = 0
+		}
+	case tea.KeyBackspace:
+		if m.iterationCursor.col > 0 {
+			line := m.iterationInput[m.iterationCursor.row]
+			m.iterationInput[m.iterationCursor.row] = line[:m.iterationCursor.col-1] + line[m.iterationCursor.col:]
+			m.iterationCursor.col--
+
+			line = m.iterationInput[m.iterationCursor.row]
+			prefix, _ := m.getAutocompletePrefix(line, m.iterationCursor.col)
+			if prefix != "" && (prefix[0] == '/' || prefix[0] == '@') {
+				m.autocompleteOptions = m.getAutocompleteOptions(prefix)
+				if len(m.autocompleteOptions) > 0 {
+					m.autocompleteActive = true
+					m.autocompleteIndex = 0
+				} else {
+					m.autocompleteActive = false
+				}
+			} else {
+				m.autocompleteActive = false
+				m.autocompleteOptions = nil
+			}
+		} else if m.iterationCursor.row > 0 {
+			m.autocompleteActive = false
+			m.autocompleteOptions = nil
+			prev := m.iterationInput[m.iterationCursor.row-1]
+			cur := m.iterationInput[m.iterationCursor.row]
+			m.iterationInput[m.iterationCursor.row-1] = prev + cur
+			m.iterationInput = append(m.iterationInput[:m.iterationCursor.row], m.iterationInput[m.iterationCursor.row+1:]...)
+			m.iterationCursor.row--
+			m.iterationCursor.col = len(prev)
+		}
+	case tea.KeyLeft:
+		m.autocompleteActive = false
+		m.autocompleteOptions = nil
+		if m.iterationCursor.col > 0 {
+			m.iterationCursor.col--
+		} else if m.iterationCursor.row > 0 {
+			m.iterationCursor.row--
+			m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
+		}
+	case tea.KeyRight:
+		m.autocompleteActive = false
+		m.autocompleteOptions = nil
+		line := m.iterationInput[m.iterationCursor.row]
+		if m.iterationCursor.col < len(line) {
+			m.iterationCursor.col++
+		} else if m.iterationCursor.row < len(m.iterationInput)-1 {
+			m.iterationCursor.row++
+			m.iterationCursor.col = 0
+		}
+	case tea.KeyUp:
+		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
+			m.autocompleteIndex--
+			if m.autocompleteIndex < 0 {
+				m.autocompleteIndex = len(m.autocompleteOptions) - 1
+			}
+		} else {
+			if m.iterationCursor.row > 0 {
+				m.iterationCursor.row--
+				if m.iterationCursor.col > len(m.iterationInput[m.iterationCursor.row]) {
+					m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
+				}
+			}
+		}
+	case tea.KeyDown:
+		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
+			m.autocompleteIndex = (m.autocompleteIndex + 1) % len(m.autocompleteOptions)
+		} else {
+			if m.iterationCursor.row < len(m.iterationInput)-1 {
+				m.iterationCursor.row++
+				if m.iterationCursor.col > len(m.iterationInput[m.iterationCursor.row]) {
+					m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
+				}
+			}
+		}
+	case tea.KeySpace:
+		m.autocompleteActive = false
+		m.autocompleteOptions = nil
+		line := m.iterationInput[m.iterationCursor.row]
+		m.iterationInput[m.iterationCursor.row] = line[:m.iterationCursor.col] + " " + line[m.iterationCursor.col:]
+		m.iterationCursor.col++
+	default:
+		if len(msg.Runes) > 0 {
+			r := string(msg.Runes)
+			line := m.iterationInput[m.iterationCursor.row]
+			m.iterationInput[m.iterationCursor.row] = line[:m.iterationCursor.col] + r + line[m.iterationCursor.col:]
+			m.iterationCursor.col += len(r)
+
+			if r == "/" || r == "@" {
+				m.autocompleteOptions = m.getAutocompleteOptions(r)
+				if len(m.autocompleteOptions) > 0 {
+					m.autocompleteActive = true
+					m.autocompleteIndex = 0
+				}
+			} else {
+				line = m.iterationInput[m.iterationCursor.row]
+				prefix, _ := m.getAutocompletePrefix(line, m.iterationCursor.col)
+				if prefix != "" && (prefix[0] == '/' || prefix[0] == '@') {
+					m.autocompleteOptions = m.getAutocompleteOptions(prefix)
+					if len(m.autocompleteOptions) > 0 {
+						m.autocompleteActive = true
+						m.autocompleteIndex = 0
+					} else {
+						m.autocompleteActive = false
+					}
+				} else {
+					m.autocompleteActive = false
+					m.autocompleteOptions = nil
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m model) getAutocompletePrefix(line string, cursorPos int) (string, int) {
+	if cursorPos > len(line) {
+		cursorPos = len(line)
+	}
+
+	start := cursorPos - 1
+	if start < 0 {
+		return "", 0
+	}
+
+	if line[start] == '/' || line[start] == '@' {
+		for start > 0 && line[start-1] != ' ' && line[start-1] != '\t' && line[start-1] != '\n' {
+			start--
+		}
+		return line[start:cursorPos], start
+	}
+
+	for start >= 0 && line[start] != ' ' && line[start] != '\t' && line[start] != '\n' {
+		if line[start] == '/' || line[start] == '@' {
+			return line[start:cursorPos], start
+		}
+		start--
+	}
+
+	return "", 0
+}
+
+func (m model) getAutocompleteOptions(prefix string) []string {
+	if len(prefix) == 0 {
+		return nil
+	}
+
+	if prefix[0] == '/' {
+		commands := []string{"/bail", "/choose", "/wrap"}
+		var matches []string
+		for _, cmd := range commands {
+			if strings.HasPrefix(cmd, prefix) {
+				matches = append(matches, cmd)
+			}
+		}
+		return matches
+	}
+
+	if prefix[0] == '@' {
+		var matches []string
+		models := m.selectedModels()
+		searchPrefix := prefix[1:]
+		for _, model := range models {
+			if strings.HasPrefix(model, searchPrefix) {
+				matches = append(matches, "@"+model)
+			}
+		}
+		return matches
+	}
+
+	return nil
+}
+
 func (m model) View() string {
+	if m.screen == screenIteration {
+		return m.viewIteration()
+	}
 	// Header and spacing
 	header := rainbowHeader(m.width)
 	spacer := "\n\n"
@@ -616,6 +862,147 @@ func (m model) View() string {
 	pairCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, pair)
 
 	return header + spacer + centeredRow + "\n\n" + pairCentered
+}
+
+func (m model) viewIteration() string {
+	header := rainbowHeader(m.width)
+
+	maxWidth := m.width
+	if maxWidth <= 0 {
+		maxWidth = 80
+	}
+
+	promptWidth := maxWidth - 20
+	if promptWidth < 60 {
+		promptWidth = 60
+	}
+	if promptWidth > 100 {
+		promptWidth = 100
+	}
+	promptHeight := m.height - 20
+	if promptHeight < 10 {
+		promptHeight = 10
+	}
+
+	selectedModels := m.selectedModels()
+
+	var pb strings.Builder
+	for i, line := range m.iterationInput {
+		if i == m.iterationCursor.row {
+			col := m.iterationCursor.col
+			if col > len(line) {
+				col = len(line)
+			}
+
+			curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
+
+			leftPart := highlightCommandLine(line[:col], selectedModels)
+			rightPart := highlightCommandLine(line[col:], selectedModels)
+
+			pb.WriteString(leftPart)
+			pb.WriteString(curBlock)
+			pb.WriteString(rightPart)
+		} else {
+			pb.WriteString(highlightCommandLine(line, selectedModels))
+		}
+		if i < len(m.iterationInput)-1 {
+			pb.WriteString("\n")
+		}
+	}
+
+	promptBox := lipgloss.NewStyle().
+		Width(promptWidth).Height(promptHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#4D96FF")).
+		Padding(1, 2)
+
+	label := lipgloss.NewStyle().Faint(true).Render("iteration prompt")
+	promptView := label + "\n" + promptBox.Render(pb.String())
+
+	if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
+		var acList strings.Builder
+		for i, opt := range m.autocompleteOptions {
+			if i == m.autocompleteIndex {
+				acList.WriteString(lipgloss.NewStyle().Reverse(true).Render(opt))
+			} else {
+				acList.WriteString(opt)
+			}
+			if i < len(m.autocompleteOptions)-1 {
+				acList.WriteString("\n")
+			}
+		}
+
+		acBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#F7B801")).
+			Padding(0, 1)
+		acView := acBox.Render(acList.String())
+
+		promptView = promptView + "\n\n" + acView
+	}
+
+	centeredPrompt := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, promptView)
+	centeredVertical := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, centeredPrompt)
+
+	return header + "\n\n" + centeredVertical
+}
+
+func highlightCommandLine(line string, selectedModels []string) string {
+	if line == "" {
+		return ""
+	}
+
+	var result strings.Builder
+	i := 0
+	runes := []rune(line)
+
+	slashStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F7B801")).Bold(true)
+	atStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6BCB77")).Bold(true)
+
+	validSlashCommands := map[string]bool{
+		"/bail":   true,
+		"/choose": true,
+		"/wrap":   true,
+	}
+
+	modelSet := make(map[string]bool)
+	for _, m := range selectedModels {
+		modelSet[m] = true
+	}
+
+	for i < len(runes) {
+		if runes[i] == '/' {
+			start := i
+			i++
+			for i < len(runes) && (runes[i] >= 'a' && runes[i] <= 'z' || runes[i] >= 'A' && runes[i] <= 'Z' || runes[i] == '-' || runes[i] == '_') {
+				i++
+			}
+			cmd := string(runes[start:i])
+			if validSlashCommands[cmd] {
+				result.WriteString(slashStyle.Render(cmd))
+			} else {
+				result.WriteString(cmd)
+			}
+		} else if runes[i] == '@' {
+			start := i
+			i++
+			for i < len(runes) && runes[i] != ' ' && runes[i] != '\t' && runes[i] != '\n' {
+				i++
+			}
+			mention := string(runes[start:i])
+			modelName := mention[1:]
+			if modelSet[modelName] {
+				result.WriteString(atStyle.Render(mention))
+			} else {
+				result.WriteString(mention)
+			}
+		} else {
+			result.WriteRune(runes[i])
+			i++
+		}
+	}
+
+	return result.String()
 }
 
 func (m model) renderModelsDropdown(width int) string {
