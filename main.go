@@ -94,6 +94,7 @@ type screenType int
 const (
 	screenSetup screenType = iota
 	screenIteration
+	screenNewTask
 )
 
 // model holds state for the TUI
@@ -159,6 +160,17 @@ type model struct {
 	createdWorktrees []string
 	modelToPaneID    map[string]string
 	modelToWorktree  map[string]string
+	modelPrompts     map[string][]string
+
+	// New task screen state
+	newTaskName       string
+	newTaskNameCursor int
+	newTaskPrompt     []string
+	newTaskCursor     struct {
+		row int
+		col int
+	}
+	newTaskFocus focusType
 }
 
 func initialModel(runCmd string) model {
@@ -191,6 +203,9 @@ func initialModel(runCmd string) model {
 		createdWorktrees: []string{},
 		modelToPaneID:    map[string]string{},
 		modelToWorktree:  map[string]string{},
+		modelPrompts:     map[string][]string{},
+		newTaskPrompt:    []string{""},
+		newTaskFocus:     focusTask,
 	}
 	return m
 }
@@ -216,14 +231,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case bailCompleteMsg:
 		return m, tea.Quit
+	case chooseCompleteMsg:
+		m.screen = screenNewTask
+		m.newTaskFocus = focusTask
+		return m, nil
+	case wrapCompleteMsg:
+		return m, tea.Quit
 	case panesOpenedMsg:
 		if msg.err == nil && msg.count > 0 {
 			m.screen = screenIteration
 			m.createdPanes = append(m.createdPanes, msg.paneIDs...)
 			m.createdWorktrees = append(m.createdWorktrees, msg.worktrees...)
+			initialPrompt := strings.TrimSpace(strings.Join(m.input, "\n"))
 			for i, modelName := range msg.modelNames {
 				m.modelToPaneID[modelName] = msg.paneIDs[i]
 				m.modelToWorktree[modelName] = msg.worktrees[i]
+				m.modelPrompts[modelName] = []string{initialPrompt}
 			}
 		}
 		return m, nil
@@ -233,6 +256,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if m.screen == screenIteration {
 			return m.updateIteration(msg)
+		}
+		if m.screen == screenNewTask {
+			return m.updateNewTask(msg)
 		}
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
@@ -524,12 +550,27 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, bailCmd(m)
 			}
 
+			if strings.HasPrefix(currentLine, "/choose ") {
+				modelName := strings.TrimSpace(strings.TrimPrefix(currentLine, "/choose "))
+				if modelName != "" {
+					return m, chooseCmd(m, modelName)
+				}
+			}
+
+			if strings.HasPrefix(currentLine, "/wrap ") {
+				modelName := strings.TrimSpace(strings.TrimPrefix(currentLine, "/wrap "))
+				if modelName != "" {
+					return m, wrapCmd(m, modelName)
+				}
+			}
+
 			if strings.HasPrefix(currentLine, "@") {
 				parts := strings.SplitN(currentLine, " ", 2)
 				if len(parts) == 2 {
 					modelName := strings.TrimPrefix(parts[0], "@")
 					prompt := parts[1]
 					if paneID, ok := m.modelToPaneID[modelName]; ok {
+						m.modelPrompts[modelName] = append(m.modelPrompts[modelName], prompt)
 						return m, sendToModelPaneCmd(paneID, modelName, prompt, m)
 					}
 				}
@@ -666,6 +707,137 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC, tea.KeyEsc:
+		return m, tea.Quit
+	case tea.KeyTab:
+		if m.newTaskFocus == focusTask {
+			m.newTaskFocus = focusPrompt
+		} else {
+			m.newTaskFocus = focusTask
+		}
+		return m, nil
+	case tea.KeyEnter:
+		if m.newTaskFocus == focusTask {
+			m.newTaskFocus = focusPrompt
+			return m, nil
+		}
+
+		currentPrompt := strings.TrimSpace(strings.Join(m.newTaskPrompt, "\n"))
+		if currentPrompt != "" {
+			models := m.selectedModels()
+			if len(models) > 0 {
+				m.task = m.newTaskName
+				m.input = m.newTaskPrompt
+				m.newTaskName = ""
+				m.newTaskNameCursor = 0
+				m.newTaskPrompt = []string{""}
+				m.newTaskCursor.row = 0
+				m.newTaskCursor.col = 0
+				return m, openPanesCmd(models, m)
+			}
+		}
+
+		before := m.newTaskPrompt[m.newTaskCursor.row][:m.newTaskCursor.col]
+		after := m.newTaskPrompt[m.newTaskCursor.row][m.newTaskCursor.col:]
+		m.newTaskPrompt[m.newTaskCursor.row] = before
+		m.newTaskPrompt = append(m.newTaskPrompt[:m.newTaskCursor.row+1], append([]string{after}, m.newTaskPrompt[m.newTaskCursor.row+1:]...)...)
+		m.newTaskCursor.row++
+		m.newTaskCursor.col = 0
+		return m, nil
+	case tea.KeyBackspace:
+		if m.newTaskFocus == focusTask {
+			if m.newTaskNameCursor > 0 && len(m.newTaskName) > 0 {
+				m.newTaskName = m.newTaskName[:m.newTaskNameCursor-1] + m.newTaskName[m.newTaskNameCursor:]
+				m.newTaskNameCursor--
+			}
+			return m, nil
+		}
+		if m.newTaskCursor.col > 0 {
+			line := m.newTaskPrompt[m.newTaskCursor.row]
+			m.newTaskPrompt[m.newTaskCursor.row] = line[:m.newTaskCursor.col-1] + line[m.newTaskCursor.col:]
+			m.newTaskCursor.col--
+		} else if m.newTaskCursor.row > 0 {
+			prev := m.newTaskPrompt[m.newTaskCursor.row-1]
+			cur := m.newTaskPrompt[m.newTaskCursor.row]
+			m.newTaskPrompt[m.newTaskCursor.row-1] = prev + cur
+			m.newTaskPrompt = append(m.newTaskPrompt[:m.newTaskCursor.row], m.newTaskPrompt[m.newTaskCursor.row+1:]...)
+			m.newTaskCursor.row--
+			m.newTaskCursor.col = len(prev)
+		}
+		return m, nil
+	case tea.KeyLeft:
+		if m.newTaskFocus == focusTask {
+			if m.newTaskNameCursor > 0 {
+				m.newTaskNameCursor--
+			}
+			return m, nil
+		}
+		if m.newTaskCursor.col > 0 {
+			m.newTaskCursor.col--
+		} else if m.newTaskCursor.row > 0 {
+			m.newTaskCursor.row--
+			m.newTaskCursor.col = len(m.newTaskPrompt[m.newTaskCursor.row])
+		}
+		return m, nil
+	case tea.KeyRight:
+		if m.newTaskFocus == focusTask {
+			if m.newTaskNameCursor < len(m.newTaskName) {
+				m.newTaskNameCursor++
+			}
+			return m, nil
+		}
+		line := m.newTaskPrompt[m.newTaskCursor.row]
+		if m.newTaskCursor.col < len(line) {
+			m.newTaskCursor.col++
+		} else if m.newTaskCursor.row < len(m.newTaskPrompt)-1 {
+			m.newTaskCursor.row++
+			m.newTaskCursor.col = 0
+		}
+		return m, nil
+	case tea.KeyUp:
+		if m.newTaskFocus == focusPrompt && m.newTaskCursor.row > 0 {
+			m.newTaskCursor.row--
+			if m.newTaskCursor.col > len(m.newTaskPrompt[m.newTaskCursor.row]) {
+				m.newTaskCursor.col = len(m.newTaskPrompt[m.newTaskCursor.row])
+			}
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.newTaskFocus == focusPrompt && m.newTaskCursor.row < len(m.newTaskPrompt)-1 {
+			m.newTaskCursor.row++
+			if m.newTaskCursor.col > len(m.newTaskPrompt[m.newTaskCursor.row]) {
+				m.newTaskCursor.col = len(m.newTaskPrompt[m.newTaskCursor.row])
+			}
+		}
+		return m, nil
+	case tea.KeySpace:
+		if m.newTaskFocus == focusTask {
+			m.newTaskName = m.newTaskName[:m.newTaskNameCursor] + " " + m.newTaskName[m.newTaskNameCursor:]
+			m.newTaskNameCursor++
+			return m, nil
+		}
+		line := m.newTaskPrompt[m.newTaskCursor.row]
+		m.newTaskPrompt[m.newTaskCursor.row] = line[:m.newTaskCursor.col] + " " + line[m.newTaskCursor.col:]
+		m.newTaskCursor.col++
+		return m, nil
+	default:
+		if len(msg.Runes) > 0 {
+			r := string(msg.Runes)
+			if m.newTaskFocus == focusTask {
+				m.newTaskName = m.newTaskName[:m.newTaskNameCursor] + r + m.newTaskName[m.newTaskNameCursor:]
+				m.newTaskNameCursor += len(r)
+				return m, nil
+			}
+			line := m.newTaskPrompt[m.newTaskCursor.row]
+			m.newTaskPrompt[m.newTaskCursor.row] = line[:m.newTaskCursor.col] + r + line[m.newTaskCursor.col:]
+			m.newTaskCursor.col += len(r)
+		}
+		return m, nil
+	}
+}
+
 func (m model) getAutocompletePrefix(line string, cursorPos int) (string, int) {
 	if cursorPos > len(line) {
 		cursorPos = len(line)
@@ -727,6 +899,9 @@ func (m model) getAutocompleteOptions(prefix string) []string {
 func (m model) View() string {
 	if m.screen == screenIteration {
 		return m.viewIteration()
+	}
+	if m.screen == screenNewTask {
+		return m.viewNewTask()
 	}
 	// Header and spacing
 	header := rainbowHeader(m.width)
@@ -989,6 +1164,88 @@ func (m model) viewIteration() string {
 	centeredVertical := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, centeredPrompt)
 
 	return header + "\n\n" + centeredVertical
+}
+
+func (m model) viewNewTask() string {
+	header := rainbowHeader(m.width)
+
+	maxWidth := m.width
+	if maxWidth <= 0 {
+		maxWidth = 80
+	}
+
+	taskNameWidth := maxWidth / 4
+	if taskNameWidth < 24 {
+		taskNameWidth = 24
+	}
+	if taskNameWidth > 40 {
+		taskNameWidth = 40
+	}
+
+	promptWidth := maxWidth / 2
+	if promptWidth < 50 {
+		promptWidth = 50
+	}
+	promptHeight := 10
+
+	tline := m.newTaskName
+	if m.newTaskNameCursor > len(tline) {
+		m.newTaskNameCursor = len(tline)
+	}
+	tLeft := tline[:m.newTaskNameCursor]
+	tRight := tline[m.newTaskNameCursor:]
+	cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
+	taskInner := tLeft + cursor + tRight
+
+	taskBorder := lipgloss.Color("#6BCB77")
+	if m.newTaskFocus == focusTask {
+		taskBorder = lipgloss.Color("#4D96FF")
+	}
+	taskBox := lipgloss.NewStyle().
+		Width(taskNameWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(taskBorder).
+		Padding(0, 2)
+
+	taskLabel := lipgloss.NewStyle().Faint(true).Render("task-name")
+	taskView := taskLabel + "\n" + taskBox.Render(taskInner)
+
+	var pb strings.Builder
+	for i, line := range m.newTaskPrompt {
+		if i == m.newTaskCursor.row {
+			col := m.newTaskCursor.col
+			if col > len(line) {
+				col = len(line)
+			}
+			curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
+			pb.WriteString(line[:col])
+			pb.WriteString(curBlock)
+			pb.WriteString(line[col:])
+		} else {
+			pb.WriteString(line)
+		}
+		if i < len(m.newTaskPrompt)-1 {
+			pb.WriteString("\n")
+		}
+	}
+
+	promptBorder := lipgloss.Color("#6BCB77")
+	if m.newTaskFocus == focusPrompt {
+		promptBorder = lipgloss.Color("#4D96FF")
+	}
+	promptBox := lipgloss.NewStyle().
+		Width(promptWidth).Height(promptHeight).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(promptBorder).
+		Padding(1, 2)
+
+	promptView := promptBox.Render(pb.String())
+
+	topGap := "  "
+	row := lipgloss.JoinHorizontal(lipgloss.Top, taskView, topGap, promptView)
+	centeredRow := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, row)
+
+	return header + "\n\n" + centeredRow
 }
 
 func highlightCommandLine(line string, selectedModels []string) string {
@@ -1365,6 +1622,10 @@ type panesOpenedMsg struct {
 
 type bailCompleteMsg struct{}
 
+type chooseCompleteMsg struct{}
+
+type wrapCompleteMsg struct{}
+
 func openPanesCmd(models []string, m model) tea.Cmd {
 	return func() tea.Msg {
 		if !tmux.IsInsideTmux() {
@@ -1464,6 +1725,160 @@ func bailCmd(m model) tea.Cmd {
 		tmux.RunCmd([]string{"display-message", "Bail complete: cleaned up panes, worktrees, and branches"})
 
 		return bailCompleteMsg{}
+	}
+}
+
+func chooseCmd(m model, modelName string) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return bailCompleteMsg{}
+		}
+
+		worktree, ok := m.modelToWorktree[modelName]
+		if !ok {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
+			return bailCompleteMsg{}
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
+			return bailCompleteMsg{}
+		}
+		parentDir := filepath.Dir(cwd)
+		worktreePath := filepath.Join(parentDir, worktree)
+
+		prompts := m.modelPrompts[modelName]
+		commitMessage := "Changes from " + modelName
+		if len(prompts) > 0 {
+			commitMessage += "\n\n"
+			for i, prompt := range prompts {
+				commitMessage += fmt.Sprintf("%d. %s\n", i+1, prompt)
+			}
+		}
+
+		cmd := exec.Command("git", "-C", worktreePath, "add", ".")
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "-C", worktreePath, "commit", "-m", commitMessage)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
+		}
+
+		featureBranch := strings.TrimSpace(m.branch)
+		cmd = exec.Command("git", "checkout", featureBranch)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "merge", "--no-ff", worktree, "-m", fmt.Sprintf("Merge changes from %s", modelName))
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "push", "origin", featureBranch)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
+		}
+
+		for _, paneID := range m.createdPanes {
+			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		}
+
+		for _, wt := range m.createdWorktrees {
+			wtPath := filepath.Join(parentDir, wt)
+			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
+			cmd.Run()
+
+			cmd = exec.Command("git", "branch", "-D", wt)
+			cmd.Run()
+		}
+
+		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Choose complete: merged %s and cleaned up", modelName)})
+
+		return chooseCompleteMsg{}
+	}
+}
+
+func wrapCmd(m model, modelName string) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return bailCompleteMsg{}
+		}
+
+		worktree, ok := m.modelToWorktree[modelName]
+		if !ok {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
+			return bailCompleteMsg{}
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
+			return bailCompleteMsg{}
+		}
+		parentDir := filepath.Dir(cwd)
+		worktreePath := filepath.Join(parentDir, worktree)
+
+		prompts := m.modelPrompts[modelName]
+		commitMessage := "Changes from " + modelName
+		if len(prompts) > 0 {
+			commitMessage += "\n\n"
+			for i, prompt := range prompts {
+				commitMessage += fmt.Sprintf("%d. %s\n", i+1, prompt)
+			}
+		}
+
+		cmd := exec.Command("git", "-C", worktreePath, "add", ".")
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "-C", worktreePath, "commit", "-m", commitMessage)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
+		}
+
+		featureBranch := strings.TrimSpace(m.branch)
+		cmd = exec.Command("git", "checkout", featureBranch)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "merge", "--no-ff", worktree, "-m", fmt.Sprintf("Merge changes from %s", modelName))
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "push", "origin", featureBranch)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
+		}
+
+		for _, paneID := range m.createdPanes {
+			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		}
+
+		for _, wt := range m.createdWorktrees {
+			wtPath := filepath.Join(parentDir, wt)
+			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
+			cmd.Run()
+
+			cmd = exec.Command("git", "branch", "-D", wt)
+			cmd.Run()
+		}
+
+		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Wrap complete: merged %s and cleaned up", modelName)})
+
+		return wrapCompleteMsg{}
 	}
 }
 
