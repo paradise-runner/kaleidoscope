@@ -1481,6 +1481,7 @@ func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model)
 		modelFull := provider + "/" + modelName
 		bashCmd := fmt.Sprintf("opencode run -m %s %s", shellQuote(modelFull), shellQuote(prompt))
 
+		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, "C-c"})
 		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, bashCmd, "Enter"})
 		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Sent to @%s: %s", modelName, prompt)})
 
