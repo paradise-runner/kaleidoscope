@@ -183,9 +183,29 @@ func initialModel(runCmd string) model {
 		"github-copilot": {},
 		"OpenAI":         {},
 	}
+
+	// Get current branch name
+	initialBranch := ""
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	if out, err := cmd.Output(); err == nil {
+		currentBranch := strings.TrimSpace(string(out))
+		// Only pre-fill if not a standard branch
+		standardBranches := map[string]bool{
+			"main":        true,
+			"master":      true,
+			"dev":         true,
+			"develop":     true,
+			"development": true,
+		}
+		if !standardBranches[currentBranch] {
+			initialBranch = currentBranch
+		}
+	}
+
 	m := model{
 		input:            []string{""},
-		branch:           "",
+		branch:           initialBranch,
+		branchCursor:     len(initialBranch),
 		task:             "",
 		providers:        []string{"github-copilot", "OpenAI"},
 		providerIndex:    0,
