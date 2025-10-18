@@ -237,6 +237,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case wrapCompleteMsg:
 		return m, tea.Quit
+	case cleanupCompleteMsg:
+		return m, tea.Quit
 	case panesOpenedMsg:
 		if msg.err == nil && msg.count > 0 {
 			m.screen = screenIteration
@@ -262,7 +264,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
-			return m, tea.Quit
+			return m, cleanupCmd(m)
 		case tea.KeyTab, tea.KeyShiftTab:
 			// Cycle focus among branch -> task -> prompt -> provider -> models -> branch
 			switch m.focus {
@@ -517,7 +519,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC, tea.KeyEsc:
-		return m, tea.Quit
+		return m, cleanupCmd(m)
 	case tea.KeyTab:
 		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
 			m.autocompleteIndex = (m.autocompleteIndex + 1) % len(m.autocompleteOptions)
@@ -710,7 +712,7 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC, tea.KeyEsc:
-		return m, tea.Quit
+		return m, cleanupCmd(m)
 	case tea.KeyTab:
 		if m.newTaskFocus == focusTask {
 			m.newTaskFocus = focusPrompt
@@ -1136,7 +1138,8 @@ func (m model) viewIteration() string {
 		Padding(1, 2)
 
 	label := lipgloss.NewStyle().Faint(true).Render("iteration prompt")
-	promptView := label + "\n" + promptBox.Render(pb.String())
+	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /choose <model> /wrap <model> | @<model> <prompt>")
+	promptView := label + "\n" + promptBox.Render(pb.String()) + "\n" + hint
 
 	if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
 		var acList strings.Builder
@@ -1626,6 +1629,8 @@ type chooseCompleteMsg struct{}
 
 type wrapCompleteMsg struct{}
 
+type cleanupCompleteMsg struct{}
+
 func openPanesCmd(models []string, m model) tea.Cmd {
 	return func() tea.Msg {
 		if !tmux.IsInsideTmux() {
@@ -1901,6 +1906,40 @@ func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model)
 		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Sent to @%s: %s", modelName, prompt)})
 
 		return nil
+	}
+}
+
+func cleanupCmd(m model) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return cleanupCompleteMsg{}
+		}
+
+		for _, paneID := range m.createdPanes {
+			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			return cleanupCompleteMsg{}
+		}
+		parentDir := filepath.Dir(cwd)
+
+		for _, worktree := range m.createdWorktrees {
+			worktreePath := filepath.Join(parentDir, worktree)
+
+			cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
+			cmd.Run()
+
+			cmd = exec.Command("git", "branch", "-D", worktree)
+			cmd.Run()
+		}
+
+		if len(m.createdPanes) > 0 || len(m.createdWorktrees) > 0 {
+			tmux.RunCmd([]string{"display-message", "Cleanup complete: closed panes, removed worktrees and branches"})
+		}
+
+		return cleanupCompleteMsg{}
 	}
 }
 
