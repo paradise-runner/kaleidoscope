@@ -153,6 +153,12 @@ type model struct {
 
 	// Run command to execute after opencode
 	runCmd string
+
+	// Track created pane IDs and worktrees
+	createdPanes     []string
+	createdWorktrees []string
+	modelToPaneID    map[string]string
+	modelToWorktree  map[string]string
 }
 
 func initialModel(runCmd string) model {
@@ -166,21 +172,25 @@ func initialModel(runCmd string) model {
 		"OpenAI":         {},
 	}
 	m := model{
-		input:          []string{""},
-		branch:         "",
-		task:           "",
-		providers:      []string{"github-copilot", "OpenAI"},
-		providerIndex:  0,
-		providerOpen:   false,
-		providerHover:  0,
-		models:         mods,
-		selected:       sel,
-		modelsOpen:     false,
-		modelsHover:    0,
-		focus:          focusPrompt,
-		screen:         screenSetup,
-		iterationInput: []string{""},
-		runCmd:         runCmd,
+		input:            []string{""},
+		branch:           "",
+		task:             "",
+		providers:        []string{"github-copilot", "OpenAI"},
+		providerIndex:    0,
+		providerOpen:     false,
+		providerHover:    0,
+		models:           mods,
+		selected:         sel,
+		modelsOpen:       false,
+		modelsHover:      0,
+		focus:            focusPrompt,
+		screen:           screenSetup,
+		iterationInput:   []string{""},
+		runCmd:           runCmd,
+		createdPanes:     []string{},
+		createdWorktrees: []string{},
+		modelToPaneID:    map[string]string{},
+		modelToWorktree:  map[string]string{},
 	}
 	return m
 }
@@ -204,9 +214,17 @@ func (m model) providerModels() []string {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case bailCompleteMsg:
+		return m, tea.Quit
 	case panesOpenedMsg:
 		if msg.err == nil && msg.count > 0 {
 			m.screen = screenIteration
+			m.createdPanes = append(m.createdPanes, msg.paneIDs...)
+			m.createdWorktrees = append(m.createdWorktrees, msg.worktrees...)
+			for i, modelName := range msg.modelNames {
+				m.modelToPaneID[modelName] = msg.paneIDs[i]
+				m.modelToWorktree[modelName] = msg.worktrees[i]
+			}
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -501,6 +519,22 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.autocompleteActive = false
 			m.autocompleteOptions = nil
 		} else {
+			currentLine := strings.TrimSpace(strings.Join(m.iterationInput, "\n"))
+			if currentLine == "/bail" {
+				return m, bailCmd(m)
+			}
+
+			if strings.HasPrefix(currentLine, "@") {
+				parts := strings.SplitN(currentLine, " ", 2)
+				if len(parts) == 2 {
+					modelName := strings.TrimPrefix(parts[0], "@")
+					prompt := parts[1]
+					if paneID, ok := m.modelToPaneID[modelName]; ok {
+						return m, sendToModelPaneCmd(paneID, modelName, prompt, m)
+					}
+				}
+			}
+
 			before := m.iterationInput[m.iterationCursor.row][:m.iterationCursor.col]
 			after := m.iterationInput[m.iterationCursor.row][m.iterationCursor.col:]
 			m.iterationInput[m.iterationCursor.row] = before
@@ -519,8 +553,13 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if prefix != "" && (prefix[0] == '/' || prefix[0] == '@') {
 				m.autocompleteOptions = m.getAutocompleteOptions(prefix)
 				if len(m.autocompleteOptions) > 0 {
-					m.autocompleteActive = true
-					m.autocompleteIndex = 0
+					if len(m.autocompleteOptions) == 1 && m.autocompleteOptions[0] == prefix {
+						m.autocompleteActive = false
+						m.autocompleteOptions = nil
+					} else {
+						m.autocompleteActive = true
+						m.autocompleteIndex = 0
+					}
 				} else {
 					m.autocompleteActive = false
 				}
@@ -607,8 +646,13 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if prefix != "" && (prefix[0] == '/' || prefix[0] == '@') {
 					m.autocompleteOptions = m.getAutocompleteOptions(prefix)
 					if len(m.autocompleteOptions) > 0 {
-						m.autocompleteActive = true
-						m.autocompleteIndex = 0
+						if len(m.autocompleteOptions) == 1 && m.autocompleteOptions[0] == prefix {
+							m.autocompleteActive = false
+							m.autocompleteOptions = nil
+						} else {
+							m.autocompleteActive = true
+							m.autocompleteIndex = 0
+						}
 					} else {
 						m.autocompleteActive = false
 					}
@@ -1312,22 +1356,26 @@ func (m model) selectedModels() []string {
 
 // panesOpenedMsg reports how many panes were opened and any error
 type panesOpenedMsg struct {
-	count int
-	err   error
+	count      int
+	err        error
+	paneIDs    []string
+	worktrees  []string
+	modelNames []string
 }
 
-// openPanesCmd splits the current tmux window once per model and tiles layout
+type bailCompleteMsg struct{}
+
 func openPanesCmd(models []string, m model) tea.Cmd {
 	return func() tea.Msg {
 		if !tmux.IsInsideTmux() {
 			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot open panes"})
-			return panesOpenedMsg{0, fmt.Errorf("not inside tmux")}
+			return panesOpenedMsg{count: 0, err: fmt.Errorf("not inside tmux")}
 		}
 
 		// Create feature branch first
 		branchName := strings.TrimSpace(m.branch)
 		if branchName == "" {
-			return panesOpenedMsg{0, fmt.Errorf("branch name is required")}
+			return panesOpenedMsg{count: 0, err: fmt.Errorf("branch name is required")}
 		}
 
 		// Try to create the branch; if it already exists, just check it out
@@ -1340,12 +1388,15 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 		// Capture the current pane id to restore focus later
 		paneOut, _, err := tmux.RunCmd([]string{"display-message", "-p", "#{pane_id}"})
 		if err != nil {
-			return panesOpenedMsg{0, err}
+			return panesOpenedMsg{count: 0, err: err}
 		}
 		origPaneID := strings.TrimSpace(paneOut)
 
 		opened := 0
 		var lastErr error
+		var paneIDs []string
+		var worktrees []string
+		var modelNames []string
 		for _, name := range models {
 			id := m.identifierFor(name)
 			// Use split-window to run the git commands in the new pane directly.
@@ -1362,10 +1413,12 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
 			if err != nil {
 				lastErr = err
-				// continue attempting remaining panes
 				continue
 			}
-			_ = out
+			newPaneID := strings.TrimSpace(out)
+			paneIDs = append(paneIDs, newPaneID)
+			worktrees = append(worktrees, id)
+			modelNames = append(modelNames, name)
 			opened++
 		}
 
@@ -1378,7 +1431,60 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 		// Inform in tmux status line
 		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Opened %d pane(s)", opened)})
 
-		return panesOpenedMsg{opened, lastErr}
+		return panesOpenedMsg{count: opened, err: lastErr, paneIDs: paneIDs, worktrees: worktrees, modelNames: modelNames}
+	}
+}
+
+func bailCmd(m model) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return bailCompleteMsg{}
+		}
+
+		for _, paneID := range m.createdPanes {
+			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			return bailCompleteMsg{}
+		}
+		parentDir := filepath.Dir(cwd)
+
+		for _, worktree := range m.createdWorktrees {
+			worktreePath := filepath.Join(parentDir, worktree)
+
+			cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
+			cmd.Run()
+
+			cmd = exec.Command("git", "branch", "-D", worktree)
+			cmd.Run()
+		}
+
+		tmux.RunCmd([]string{"display-message", "Bail complete: cleaned up panes, worktrees, and branches"})
+
+		return bailCompleteMsg{}
+	}
+}
+
+func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return nil
+		}
+
+		shellQuote := func(s string) string {
+			return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+		}
+
+		provider := m.currentProvider()
+		modelFull := provider + "/" + modelName
+		bashCmd := fmt.Sprintf("opencode run -m %s %s", shellQuote(modelFull), shellQuote(prompt))
+
+		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, bashCmd, "Enter"})
+		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Sent to @%s: %s", modelName, prompt)})
+
+		return nil
 	}
 }
 
