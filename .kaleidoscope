@@ -1,0 +1,9 @@
+{
+  "provider": "github-copilot",
+  "models": {},
+  "choices": {
+    "github-copilot": {
+      "claude-haiku-4.5": 1
+    }
+  }
+}
