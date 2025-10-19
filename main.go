@@ -17,8 +17,9 @@ import (
 )
 
 type kaleidoscopeDefaults struct {
-	Provider string              `json:"provider"`
-	Models   map[string][]string `json:"models"`
+	Provider string                    `json:"provider"`
+	Models   map[string][]string       `json:"models"`
+	Choices  map[string]map[string]int `json:"choices"`
 }
 
 func loadDefaults() *kaleidoscopeDefaults {
@@ -41,10 +42,55 @@ func loadDefaults() *kaleidoscopeDefaults {
 	return &defaults
 }
 
+func incrementChoice(provider string, model string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	configPath := filepath.Join(cwd, ".kaleidoscope")
+
+	defaults := loadDefaults()
+	if defaults == nil {
+		defaults = &kaleidoscopeDefaults{
+			Provider: provider,
+			Models:   make(map[string][]string),
+			Choices:  make(map[string]map[string]int),
+		}
+	}
+
+	if defaults.Choices == nil {
+		defaults.Choices = make(map[string]map[string]int)
+	}
+
+	if defaults.Choices[provider] == nil {
+		defaults.Choices[provider] = make(map[string]int)
+	}
+
+	defaults.Choices[provider][model]++
+
+	data, err := json.MarshalIndent(defaults, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(configPath, data, 0644)
+}
+
 func saveDefaults(provider string, selected map[string]map[string]bool) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
+	}
+
+	configPath := filepath.Join(cwd, ".kaleidoscope")
+
+	existing := loadDefaults()
+	var choices map[string]map[string]int
+	if existing != nil && existing.Choices != nil {
+		choices = existing.Choices
+	} else {
+		choices = make(map[string]map[string]int)
 	}
 
 	models := make(map[string][]string)
@@ -63,6 +109,7 @@ func saveDefaults(provider string, selected map[string]map[string]bool) error {
 	defaults := kaleidoscopeDefaults{
 		Provider: provider,
 		Models:   models,
+		Choices:  choices,
 	}
 
 	data, err := json.MarshalIndent(defaults, "", "  ")
@@ -70,7 +117,6 @@ func saveDefaults(provider string, selected map[string]map[string]bool) error {
 		return err
 	}
 
-	configPath := filepath.Join(cwd, ".kaleidoscope")
 	return os.WriteFile(configPath, data, 0644)
 }
 
@@ -1858,6 +1904,10 @@ func chooseCmd(m model, modelName string) tea.Cmd {
 		if !ok {
 			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
 			return bailCompleteMsg{}
+		}
+
+		if err := incrementChoice(m.currentProvider(), modelName); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
 		}
 
 		cwd, err := os.Getwd()
