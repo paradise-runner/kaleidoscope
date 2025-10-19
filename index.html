@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kaleidoscope - Multi-Model AI Coding Tool</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #2e2c3e;
+            color: #e0e0e0;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 4rem 0;
+        }
+
+        .logo-title {
+            font-size: 3.5rem;
+            font-weight: bold;
+            background: linear-gradient(90deg, 
+                #5b9bd5, #6db8e3, #7ed5c8, #a6d96a, 
+                #d4d84f, #f4c430, #ff9f40, #ff7f6e, 
+                #ff6b9d, #d896ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 1rem;
+            letter-spacing: 0.1em;
+        }
+
+        .tagline {
+            font-size: 1.2rem;
+            color: #a0a0a0;
+            margin-bottom: 2rem;
+        }
+
+        .cta-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 0.8rem 2rem;
+            text-decoration: none;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            transition: all 0.3s;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #7ed5c8, #6db8e3);
+            color: #2e2c3e;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(126, 213, 200, 0.4);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: #7ed5c8;
+            border: 2px solid #7ed5c8;
+        }
+
+        .btn-secondary:hover {
+            background: #7ed5c8;
+            color: #2e2c3e;
+        }
+
+        .main-image {
+            margin: 3rem 0;
+            text-align: center;
+        }
+
+        .main-image img {
+            width: 100%;
+            max-width: 900px;
+            border-radius: 8px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 2rem;
+            margin: 4rem 0;
+        }
+
+        .feature {
+            background: #3a3849;
+            padding: 2rem;
+            border-radius: 8px;
+            border-left: 4px solid;
+            transition: transform 0.3s;
+        }
+
+        .feature:nth-child(1) { border-left-color: #5b9bd5; }
+        .feature:nth-child(2) { border-left-color: #a6d96a; }
+        .feature:nth-child(3) { border-left-color: #ff9f40; }
+        .feature:nth-child(4) { border-left-color: #d896ff; }
+
+        .feature:hover {
+            transform: translateY(-4px);
+        }
+
+        .feature h3 {
+            color: #7ed5c8;
+            margin-bottom: 0.5rem;
+        }
+
+        .feature p {
+            color: #b0b0b0;
+        }
+
+        .demo-section {
+            margin: 4rem 0;
+            text-align: center;
+        }
+
+        .demo-section h2 {
+            color: #7ed5c8;
+            margin-bottom: 2rem;
+            font-size: 2rem;
+        }
+
+        .expandable-demo {
+            background: #3a3849;
+            border-radius: 8px;
+            overflow: hidden;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .expand-button {
+            width: 100%;
+            padding: 1rem;
+            background: #4a4858;
+            color: #7ed5c8;
+            border: none;
+            cursor: pointer;
+            font-family: 'Courier New', monospace;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            transition: background 0.3s;
+        }
+
+        .expand-button:hover {
+            background: #5a5868;
+        }
+
+        .arrow {
+            transition: transform 0.3s;
+        }
+
+        .expandable-demo.expanded .arrow {
+            transform: rotate(180deg);
+        }
+
+        .demo-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.5s ease-out;
+        }
+
+        .expandable-demo.expanded .demo-content {
+            max-height: 1000px;
+        }
+
+        .demo-content img {
+            width: 100%;
+            display: block;
+        }
+
+        footer {
+            text-align: center;
+            padding: 3rem 0;
+            color: #808080;
+            border-top: 1px solid #4a4858;
+            margin-top: 4rem;
+        }
+
+        footer a {
+            color: #7ed5c8;
+            text-decoration: none;
+        }
+
+        footer a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 768px) {
+            .logo-title {
+                font-size: 2rem;
+            }
+
+            .tagline {
+                font-size: 1rem;
+            }
+
+            .features {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1 class="logo-title">KALEIDOSCOPE</h1>
+            <p class="tagline">Run multiple AI models in parallel, compare outputs, choose the best solution</p>
+            <div class="cta-buttons">
+                <a href="https://github.com/paradise-runner/kaleidoscope" class="btn btn-primary">View on GitHub</a>
+                <a href="#demo" class="btn btn-secondary" onclick="event.preventDefault(); document.getElementById('demo').scrollIntoView({behavior: 'smooth'}); setTimeout(() => { const demoElement = document.getElementById('demoExpand'); if (!demoElement.classList.contains('expanded')) { demoElement.classList.add('expanded'); } }, 500);">See Demo</a>
+            </div>
+        </header>
+
+        <div class="main-image">
+            <img src="./assets/tui.png" alt="Kaleidoscope TUI Interface">
+        </div>
+
+        <div class="features">
+            <div class="feature">
+                <h3>Multi-Model Parallel Execution</h3>
+                <p>Run multiple AI models (Claude, GPT, etc.) on the same prompt simultaneously and compare results in real-time.</p>
+            </div>
+            <div class="feature">
+                <h3>Git Worktree Integration</h3>
+                <p>Each model works in its own isolated git worktree, keeping your main branch clean and safe.</p>
+            </div>
+            <div class="feature">
+                <h3>Interactive Iteration</h3>
+                <p>Send follow-up prompts to specific models using @model syntax. Refine and guide each AI independently.</p>
+            </div>
+            <div class="feature">
+                <h3>Smart Cleanup</h3>
+                <p>Choose winning solutions and automatically merge, or bail and cleanup everything with a single command.</p>
+            </div>
+        </div>
+
+        <div class="demo-section" id="demo">
+            <h2>See It In Action</h2>
+            <div class="expandable-demo" id="demoExpand">
+                <button class="expand-button" onclick="toggleDemo()">
+                    <span>Watch Demo</span>
+                    <span class="arrow">▼</span>
+                </button>
+                <div class="demo-content">
+                    <img src="./assets/kaleidoscope-demo.gif" alt="Kaleidoscope Demo Animation">
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>Built by <a href="https://hec.works">Edward Champion</a></p>
+            <p><a href="https://github.com/paradise-runner/kaleidoscope">GitHub</a> | MIT License</p>
+        </footer>
+    </div>
+
+    <script>
+        function toggleDemo() {
+            const demoElement = document.getElementById('demoExpand');
+            demoElement.classList.toggle('expanded');
+        }
+    </script>
+</body>
+</html>

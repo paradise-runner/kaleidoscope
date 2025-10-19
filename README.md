@@ -1,0 +1,191 @@
+# Kaleidoscope
+
+<image src="assets/logo.png" alt="logo" width="200"/>
+
+## Overview
+
+Kaleidoscope is a command-line tool that enables developers to run multiple AI models in parallel on the same coding task, compare their outputs, and choose the best solution seamlessly. It integrates with `tmux` and `git worktrees` to provide an efficient and safe workflow for AI-assisted coding.
+
+<image src="assets/tui.png" alt="kaleidoscope tui" width="600"/>
+
+## Features
+
+- **Multi-model parallel execution**: Run multiple AI models (Claude, GPT, etc.) on the same prompt simultaneously
+- **Git worktree integration**: Each model works in its own isolated git worktree
+- **Branch management**: Automatically creates and manages feature branches
+- **Interactive iteration**: Send follow-up prompts to specific models using `@model` syntax
+- **Smart cleanup**: Choose winning solutions and automatically merge, or bail and cleanup everything
+- **Defaults persistence**: Save your preferred provider and models in `.kaleidoscope` config
+- **Command autocomplete**: Tab completion for commands and model names
+
+## Prerequisites
+
+- **tmux**: Must be running inside a tmux session
+    - `brew install tmux` (macOS)
+- **git**: Repository with git initialized
+- **opencode**: The `opencode` CLI tool must be installed and configured
+    - `brew install opencodeai/tap/opencode` (macOS)
+- **Go 1.24+**: For building from source
+
+## Installation
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/kaleidoscope.git
+cd kaleidoscope
+
+# Build
+go build -o kaleidoscope
+
+# Add the alias to your shell profile
+echo 'alias kal="path/to/kaleidoscope/kaleidoscope"' >> ~/.zshrc
+source ~/.zshrc
+# Now you can run Kaleidoscope using the `kal` command
+```
+
+## Usage
+
+### Basic Usage
+
+Run Kaleidoscope with the required `--run` flag specifying the command to execute after opencode completes:
+
+```bash
+kaleidoscope --run "npm test"
+```
+
+<image src="assets/kaleidoscope-demo.gif" alt="kaleidoscope demo" width="600"/>
+
+
+### Interface
+
+When launched, Kaleidoscope presents a TUI with the following fields:
+
+1. **branch-name**: Name of the feature branch to create
+2. **task-name**: Description of the task
+3. **prompt**: Multi-line prompt to send to AI models
+4. **model provider**: Select between github-copilot, OpenAI, etc.
+5. **models**: Multi-select dropdown to choose which models to run
+
+Navigate with:
+- `Tab`: Cycle between fields
+- `↑↓`: Navigate dropdowns and multi-line text
+- `Space`: Toggle model selection
+- `Enter`: Submit (creates worktrees and opens panes)
+- `Ctrl+C` or `Esc`: Cancel and cleanup
+
+### Iteration Commands
+
+Once models are running in separate panes, you can use these commands in the iteration prompt:
+
+- `/bail`: Cancel everything and cleanup all panes, worktrees, and branches
+- `/choose <model>`: Merge the specified model's changes to the feature branch, push, and cleanup
+- `/wrap <model>`: Similar to choose, but returns to new task screen instead of exiting
+- `@<model> <prompt>`: Send a follow-up prompt to a specific model
+
+Example:
+```
+@claude-sonnet-4.5 add error handling to the login function
+```
+
+### Saving Defaults
+
+Save your preferred provider and model selections:
+
+```bash
+kaleidoscope --run "npm test" --set-default
+```
+
+This creates a `.kaleidoscope` file in your current directory with your preferences. The file includes:
+- Default provider
+- Selected models per provider
+- Usage statistics for each model (tracked when using `/choose`)
+
+## Configuration
+
+The `.kaleidoscope` file is a JSON file storing:
+
+```json
+{
+  "provider": "github-copilot",
+  "models": {
+    "github-copilot": ["claude-sonnet-4.5", "gpt-5-mini"]
+  },
+  "choices": {
+    "github-copilot": {
+      "claude-sonnet-4.5": 5,
+      "gpt-5-mini": 2
+    }
+  }
+}
+```
+
+## Workflow Example
+
+1. Start kaleidoscope in a tmux session:
+   ```bash
+   kaleidoscope --run "go test ./..."
+   ```
+
+2. Fill in the form:
+   - branch-name: `feature/add-auth`
+   - task-name: `add-jwt-authentication`
+   - prompt: `Add JWT authentication to the API`
+   - Select provider and models (e.g., claude-sonnet-4.5, gpt-5)
+
+3. Press Enter - creates worktrees and opens panes for each model
+
+4. Models run in parallel in separate panes
+
+5. Review outputs and send follow-up prompts:
+   ```
+   @claude-sonnet-4.5 add rate limiting
+   ```
+
+6. Choose the best solution:
+   ```
+   /choose claude-sonnet-4.5
+   ```
+
+7. Kaleidoscope commits changes, merges to feature branch, pushes, and cleans up
+
+## How It Works
+
+1. **Setup**: Creates a feature branch from your current branch
+2. **Worktrees**: For each selected model, creates a git worktree in `../<repo>-<branch>-<task>-<model>/`
+3. **Execution**: Opens a tmux pane for each worktree and runs `opencode run -m <provider>/<model> <prompt>`
+4. **Iteration**: Allows sending additional prompts to specific models
+5. **Selection**: When you `/choose` a model:
+   - Commits all changes in that model's worktree
+   - Merges to the feature branch with `--no-ff`
+   - Pushes to origin
+   - Cleans up all panes, worktrees, and temporary branches
+6. **Cleanup**: `/bail` removes everything without merging
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details
+
+## Author
+
+Edward Champion
+
+<a href="https://github.com/paradise-runner">
+  <svg width="50" height="50" viewBox="0 0 50 50">
+    <defs>
+      <clipPath id="circle">
+        <circle cx="25" cy="25" r="25"/>
+      </clipPath>
+    </defs>
+    <image href="https://avatars.githubusercontent.com/u/75316166?v=4" x="0" y="0" height="50" width="50" clip-path="url(#circle)"/>
+  </svg>
+</a>
+<a href="https://hec.works">
+  <svg width="50" height="50" viewBox="0 0 50 50">
+    <defs>
+      <clipPath id="circle">
+        <circle cx="25" cy="25" r="25"/>
+      </clipPath>
+    </defs>
+    <image href="./assets/hecworks-logo.png" x="0" y="0" height="50" width="50" clip-path="url(#circle)"/>
+  </svg>
+</a>
