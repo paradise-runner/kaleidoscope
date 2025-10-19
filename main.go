@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math"
@@ -14,6 +15,64 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	tmux "github.com/jubnzv/go-tmux"
 )
+
+type kaleidoscopeDefaults struct {
+	Provider string              `json:"provider"`
+	Models   map[string][]string `json:"models"`
+}
+
+func loadDefaults() *kaleidoscopeDefaults {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+
+	configPath := filepath.Join(cwd, ".kaleidoscope")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+
+	var defaults kaleidoscopeDefaults
+	if err := json.Unmarshal(data, &defaults); err != nil {
+		return nil
+	}
+
+	return &defaults
+}
+
+func saveDefaults(provider string, selected map[string]map[string]bool) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	models := make(map[string][]string)
+	for prov, sel := range selected {
+		var selectedModels []string
+		for model, isSelected := range sel {
+			if isSelected {
+				selectedModels = append(selectedModels, model)
+			}
+		}
+		if len(selectedModels) > 0 {
+			models[prov] = selectedModels
+		}
+	}
+
+	defaults := kaleidoscopeDefaults{
+		Provider: provider,
+		Models:   models,
+	}
+
+	data, err := json.MarshalIndent(defaults, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	configPath := filepath.Join(cwd, ".kaleidoscope")
+	return os.WriteFile(configPath, data, 0644)
+}
 
 // identifier composes the current folder (repo) + branch + task + first selected model
 func (m model) identifier() string {
@@ -171,25 +230,46 @@ type model struct {
 		col int
 	}
 	newTaskFocus focusType
+
+	// Flag to save defaults
+	setDefault bool
 }
 
-func initialModel(runCmd string) model {
+func initialModel(runCmd string, setDefault bool) model {
 	mods := map[string][]string{
 		"github-copilot": {"claude-sonnet-4.5", "gpt-5-mini", "claude-haiku-4.5"},
 		"OpenAI":         {"gpt-5", "gpt-5-codex", "gpt-5-mini"},
 	}
-	// initialize empty selections per provider
 	sel := map[string]map[string]bool{
 		"github-copilot": {},
 		"OpenAI":         {},
 	}
 
-	// Get current branch name
+	providerIndex := 0
+
+	defaults := loadDefaults()
+	if defaults != nil {
+		for i, provider := range []string{"github-copilot", "OpenAI"} {
+			if provider == defaults.Provider {
+				providerIndex = i
+				break
+			}
+		}
+
+		if models, ok := defaults.Models[defaults.Provider]; ok {
+			for _, model := range models {
+				if sel[defaults.Provider] == nil {
+					sel[defaults.Provider] = make(map[string]bool)
+				}
+				sel[defaults.Provider][model] = true
+			}
+		}
+	}
+
 	initialBranch := ""
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
 	if out, err := cmd.Output(); err == nil {
 		currentBranch := strings.TrimSpace(string(out))
-		// Only pre-fill if not a standard branch
 		standardBranches := map[string]bool{
 			"main":        true,
 			"master":      true,
@@ -208,7 +288,7 @@ func initialModel(runCmd string) model {
 		branchCursor:     len(initialBranch),
 		task:             "",
 		providers:        []string{"github-copilot", "OpenAI"},
-		providerIndex:    0,
+		providerIndex:    providerIndex,
 		providerOpen:     false,
 		providerHover:    0,
 		models:           mods,
@@ -226,6 +306,7 @@ func initialModel(runCmd string) model {
 		modelPrompts:     map[string][]string{},
 		newTaskPrompt:    []string{""},
 		newTaskFocus:     focusTask,
+		setDefault:       setDefault,
 	}
 	return m
 }
@@ -1076,7 +1157,10 @@ func (m model) View() string {
 		pair := lipgloss.JoinHorizontal(lipgloss.Top, provView, gap, modelsView)
 		pairCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, pair)
 
-		return header + spacer + centeredRow + "\n\n" + pairCentered
+		hint := lipgloss.NewStyle().Faint(true).Render("tab: next field • ↑↓: navigate • space: select models • enter: submit")
+		hintCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, hint)
+
+		return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered
 	}
 
 	// Provider open view
@@ -1102,7 +1186,10 @@ func (m model) View() string {
 	pair := lipgloss.JoinHorizontal(lipgloss.Top, provOpenView, gap, modelsView)
 	pairCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, pair)
 
-	return header + spacer + centeredRow + "\n\n" + pairCentered
+	hint := lipgloss.NewStyle().Faint(true).Render("tab: next field • ↑↓: navigate • space: select models • enter: submit")
+	hintCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, hint)
+
+	return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered
 }
 
 func (m model) viewIteration() string {
@@ -1653,6 +1740,14 @@ type cleanupCompleteMsg struct{}
 
 func openPanesCmd(models []string, m model) tea.Cmd {
 	return func() tea.Msg {
+		if m.setDefault {
+			if err := saveDefaults(m.currentProvider(), m.selected); err != nil {
+				tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to save defaults: %s", err)})
+			} else {
+				tmux.RunCmd([]string{"display-message", "Saved provider and model defaults to .kaleidoscope"})
+			}
+		}
+
 		if !tmux.IsInsideTmux() {
 			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot open panes"})
 			return panesOpenedMsg{count: 0, err: fmt.Errorf("not inside tmux")}
@@ -1965,6 +2060,7 @@ func cleanupCmd(m model) tea.Cmd {
 
 func main() {
 	run := flag.String("run", "", "run command (required)")
+	setDefault := flag.Bool("set-default", false, "save chosen provider and models as defaults in .kaleidoscope")
 	flag.Parse()
 
 	if *run == "" {
@@ -1973,7 +2069,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	p := tea.NewProgram(initialModel(*run), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(*run, *setDefault), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
