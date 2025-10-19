@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -279,6 +280,9 @@ type model struct {
 
 	// Flag to save defaults
 	setDefault bool
+
+	// Cursor blinking state
+	cursorVisible bool
 }
 
 func initialModel(runCmd string, setDefault bool) model {
@@ -353,11 +357,16 @@ func initialModel(runCmd string, setDefault bool) model {
 		newTaskPrompt:    []string{""},
 		newTaskFocus:     focusTask,
 		setDefault:       setDefault,
+		cursorVisible:    true,
 	}
 	return m
 }
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+	return tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg {
+		return cursorBlinkMsg{}
+	})
+}
 
 func (m model) currentProvider() string {
 	if len(m.providers) == 0 {
@@ -376,6 +385,11 @@ func (m model) providerModels() []string {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case cursorBlinkMsg:
+		m.cursorVisible = !m.cursorVisible
+		return m, tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg {
+			return cursorBlinkMsg{}
+		})
 	case bailCompleteMsg:
 		return m, tea.Quit
 	case chooseCompleteMsg:
@@ -1094,8 +1108,11 @@ func (m model) View() string {
 	}
 	bLeft := bline[:m.branchCursor]
 	bRight := bline[m.branchCursor:]
-	cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
-	branchInner := bLeft + cursor + bRight
+	branchInner := bLeft + bRight
+	if m.focus == focusBranch && m.cursorVisible {
+		cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
+		branchInner = bLeft + cursor + bRight
+	}
 
 	// Render task single-line with cursor
 	tline := m.task
@@ -1104,7 +1121,11 @@ func (m model) View() string {
 	}
 	tLeft := tline[:m.taskCursor]
 	tRight := tline[m.taskCursor:]
-	taskInner := tLeft + cursor + tRight
+	taskInner := tLeft + tRight
+	if m.focus == focusTask && m.cursorVisible {
+		cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
+		taskInner = tLeft + cursor + tRight
+	}
 
 	branchBorder := lipgloss.Color("#6BCB77")
 	if m.focus == focusBranch {
@@ -1139,9 +1160,11 @@ func (m model) View() string {
 			if col > len(line) {
 				col = len(line)
 			}
-			curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
 			pb.WriteString(line[:col])
-			pb.WriteString(curBlock)
+			if m.focus == focusPrompt && m.cursorVisible {
+				curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
+				pb.WriteString(curBlock)
+			}
 			pb.WriteString(line[col:])
 		} else {
 			pb.WriteString(line)
@@ -1268,13 +1291,14 @@ func (m model) viewIteration() string {
 				col = len(line)
 			}
 
-			curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
-
 			leftPart := highlightCommandLine(line[:col], selectedModels)
 			rightPart := highlightCommandLine(line[col:], selectedModels)
 
 			pb.WriteString(leftPart)
-			pb.WriteString(curBlock)
+			if m.cursorVisible {
+				curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
+				pb.WriteString(curBlock)
+			}
 			pb.WriteString(rightPart)
 		} else {
 			pb.WriteString(highlightCommandLine(line, selectedModels))
@@ -1350,8 +1374,11 @@ func (m model) viewNewTask() string {
 	}
 	tLeft := tline[:m.newTaskNameCursor]
 	tRight := tline[m.newTaskNameCursor:]
-	cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
-	taskInner := tLeft + cursor + tRight
+	taskInner := tLeft + tRight
+	if m.newTaskFocus == focusTask && m.cursorVisible {
+		cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
+		taskInner = tLeft + cursor + tRight
+	}
 
 	taskBorder := lipgloss.Color("#6BCB77")
 	if m.newTaskFocus == focusTask {
@@ -1373,9 +1400,11 @@ func (m model) viewNewTask() string {
 			if col > len(line) {
 				col = len(line)
 			}
-			curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
 			pb.WriteString(line[:col])
-			pb.WriteString(curBlock)
+			if m.newTaskFocus == focusPrompt && m.cursorVisible {
+				curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
+				pb.WriteString(curBlock)
+			}
 			pb.WriteString(line[col:])
 		} else {
 			pb.WriteString(line)
@@ -1783,6 +1812,8 @@ type chooseCompleteMsg struct{}
 type wrapCompleteMsg struct{}
 
 type cleanupCompleteMsg struct{}
+
+type cursorBlinkMsg struct{}
 
 func openPanesCmd(models []string, m model) tea.Cmd {
 	return func() tea.Msg {
