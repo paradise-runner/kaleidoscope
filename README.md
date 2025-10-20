@@ -19,28 +19,16 @@ Kaleidoscope is a command-line tool that enables developers to run multiple AI m
 - **Command autocomplete**: Tab completion for commands and model names
 
 ## Prerequisites
-
+> Currently only MacOS is supported.
 - **tmux**: Must be running inside a tmux session
     - `brew install tmux` (macOS)
-- **git**: Repository with git initialized
 - **opencode**: The `opencode` CLI tool must be installed and configured
-    - `brew install opencodeai/tap/opencode` (macOS)
-- **Go 1.24+**: For building from source
+    - `brew install sst/tap/opencode` (macOS)
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/kaleidoscope.git
-cd kaleidoscope
-
-# Build
-go build -o kaleidoscope
-
-# Add the alias to your shell profile
-echo 'alias kal="path/to/kaleidoscope/kaleidoscope"' >> ~/.zshrc
-source ~/.zshrc
-# Now you can run Kaleidoscope using the `kal` command
+brew install paradise-runner/tap/kaleidoscope
 ```
 
 ## Usage
@@ -50,8 +38,14 @@ source ~/.zshrc
 Run Kaleidoscope with the required `--run` flag specifying the command to execute after opencode completes:
 
 ```bash
+# start a new tmux session
+tmux
+
+# run kaleidoscope with your test command
 kaleidoscope --run "npm test"
 ```
+
+Let the fireworks begin!
 
 <image src="assets/kaleidoscope-demo.gif" alt="kaleidoscope demo" width="600"/>
 
@@ -169,23 +163,5 @@ MIT License - see [LICENSE](LICENSE) file for details
 
 Edward Champion
 
-<a href="https://github.com/paradise-runner">
-  <svg width="50" height="50" viewBox="0 0 50 50">
-    <defs>
-      <clipPath id="circle">
-        <circle cx="25" cy="25" r="25"/>
-      </clipPath>
-    </defs>
-    <image href="https://avatars.githubusercontent.com/u/75316166?v=4" x="0" y="0" height="50" width="50" clip-path="url(#circle)"/>
-  </svg>
-</a>
-<a href="https://hec.works">
-  <svg width="50" height="50" viewBox="0 0 50 50">
-    <defs>
-      <clipPath id="circle">
-        <circle cx="25" cy="25" r="25"/>
-      </clipPath>
-    </defs>
-    <image href="./assets/hecworks-logo.png" x="0" y="0" height="50" width="50" clip-path="url(#circle)"/>
-  </svg>
-</a>
+- personal website: [hec.works](https://hec.works)
+- github: [paradise-runner](https://github.com/paradise-runner)
