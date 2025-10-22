@@ -287,7 +287,7 @@ type model struct {
 
 func initialModel(runCmd string, setDefault bool) model {
 	mods := map[string][]string{
-		"github-copilot": {"claude-sonnet-4.5", "gpt-5-mini", "claude-haiku-4.5"},
+		"github-copilot": {"claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5-mini", "gpt-5", "gemini-2.0-flash-001", "claude-opus-4", "grok-code-fast-1", "claude-3.5-sonnet", "o3-mini", "gpt-5-codex", "gpt-4o", "gpt-4.1", "o4-mini", "claude-opus-41", "claude-3.7-sonnet", "gemini-2.5-pro", "o3", "claude-sonnet-4", "claude-3.7-sonnet-thought"},
 		"OpenAI":         {"gpt-5", "gpt-5-codex", "gpt-5-mini"},
 	}
 	sel := map[string]map[string]bool{
