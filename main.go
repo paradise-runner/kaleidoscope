@@ -200,6 +200,7 @@ type screenType int
 const (
 	screenSetup screenType = iota
 	screenIteration
+	screenProgress
 	screenNewTask
 )
 
@@ -283,6 +284,11 @@ type model struct {
 
 	// Cursor blinking state
 	cursorVisible bool
+
+	// Progress screen state
+	progressMsg   string
+	spinnerIndex  int
+	spinnerFrames []string
 }
 
 func initialModel(runCmd string, setDefault bool) model {
@@ -358,14 +364,18 @@ func initialModel(runCmd string, setDefault bool) model {
 		newTaskFocus:     focusTask,
 		setDefault:       setDefault,
 		cursorVisible:    true,
+		spinnerIndex:     0,
+		spinnerFrames:    []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
+		progressMsg:      "",
 	}
 	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg {
-		return cursorBlinkMsg{}
-	})
+	return tea.Batch(
+		tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg { return cursorBlinkMsg{} }),
+		tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg { return spinnerTickMsg{} }),
+	)
 }
 
 func (m model) currentProvider() string {
@@ -390,6 +400,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(time.Millisecond*500, func(t time.Time) tea.Msg {
 			return cursorBlinkMsg{}
 		})
+	case spinnerTickMsg:
+		if len(m.spinnerFrames) > 0 {
+			m.spinnerIndex = (m.spinnerIndex + 1) % len(m.spinnerFrames)
+		}
+		return m, tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg { return spinnerTickMsg{} })
 	case bailCompleteMsg:
 		return m, tea.Quit
 	case chooseCompleteMsg:
@@ -710,12 +725,16 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			currentLine := strings.TrimSpace(strings.Join(m.iterationInput, "\n"))
 			if currentLine == "/bail" {
+				m.screen = screenProgress
+				m.progressMsg = "Cleaning up panes, worktrees, and branches..."
 				return m, bailCmd(m)
 			}
 
 			if strings.HasPrefix(currentLine, "/choose ") {
 				modelName := strings.TrimSpace(strings.TrimPrefix(currentLine, "/choose "))
 				if modelName != "" {
+					m.screen = screenProgress
+					m.progressMsg = fmt.Sprintf("Merging and pushing changes from %s...", modelName)
 					return m, chooseCmd(m, modelName)
 				}
 			}
@@ -723,6 +742,8 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.HasPrefix(currentLine, "/wrap ") {
 				modelName := strings.TrimSpace(strings.TrimPrefix(currentLine, "/wrap "))
 				if modelName != "" {
+					m.screen = screenProgress
+					m.progressMsg = fmt.Sprintf("Merging and pushing changes from %s...", modelName)
 					return m, wrapCmd(m, modelName)
 				}
 			}
@@ -1065,6 +1086,9 @@ func (m model) View() string {
 	}
 	if m.screen == screenNewTask {
 		return m.viewNewTask()
+	}
+	if m.screen == screenProgress {
+		return m.viewProgress()
 	}
 	// Header and spacing
 	header := rainbowHeader(m.width)
@@ -1431,6 +1455,27 @@ func (m model) viewNewTask() string {
 	centeredRow := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, row)
 
 	return header + "\n\n" + centeredRow
+}
+
+func (m model) viewProgress() string {
+	header := rainbowHeader(m.width)
+	maxWidth := m.width
+	if maxWidth <= 0 {
+		maxWidth = 80
+	}
+	// center a simple spinner with message
+	spinner := ""
+	if len(m.spinnerFrames) > 0 {
+		spinner = m.spinnerFrames[m.spinnerIndex%len(m.spinnerFrames)]
+	}
+	msg := m.progressMsg
+	if msg == "" {
+		msg = "Working..."
+	}
+	line := fmt.Sprintf(" %s  %s", spinner, msg)
+	centered := lipgloss.PlaceHorizontal(maxWidth, lipgloss.Center, line)
+	centeredVertical := lipgloss.Place(maxWidth, m.height, lipgloss.Center, lipgloss.Center, centered)
+	return header + "\n\n" + centeredVertical
 }
 
 func highlightCommandLine(line string, selectedModels []string) string {
@@ -1814,6 +1859,8 @@ type wrapCompleteMsg struct{}
 type cleanupCompleteMsg struct{}
 
 type cursorBlinkMsg struct{}
+
+type spinnerTickMsg struct{}
 
 func openPanesCmd(models []string, m model) tea.Cmd {
 	return func() tea.Msg {
