@@ -17,6 +17,8 @@ import (
 	tmux "github.com/jubnzv/go-tmux"
 )
 
+const escDelay = 150 * time.Millisecond
+
 type kaleidoscopeDefaults struct {
 	Provider string                    `json:"provider"`
 	Models   map[string][]string       `json:"models"`
@@ -289,6 +291,9 @@ type model struct {
 	progressMsg   string
 	spinnerIndex  int
 	spinnerFrames []string
+
+	// Pending ESC to detect Alt sequences
+	pendingEsc bool
 }
 
 func initialModel(runCmd string, setDefault bool) model {
@@ -367,6 +372,7 @@ func initialModel(runCmd string, setDefault bool) model {
 		spinnerIndex:     0,
 		spinnerFrames:    []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"},
 		progressMsg:      "",
+		pendingEsc:       false,
 	}
 	return m
 }
@@ -391,6 +397,83 @@ func (m model) providerModels() []string {
 		return nil
 	}
 	return m.models[p]
+}
+
+// Simple ASCII word helpers
+func isWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+func wordLeft(line string, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	i := col
+	// Move left over spaces
+	for i > 0 {
+		c := line[i-1]
+		if c == ' ' || c == '\t' || c == '\n' {
+			i--
+		} else {
+			break
+		}
+	}
+	// Move left over word chars
+	for i > 0 && isWordByte(line[i-1]) {
+		i--
+	}
+	return i
+}
+
+func wordRight(line string, col int) int {
+	n := len(line)
+	if col >= n {
+		return n
+	}
+	i := col
+	// If currently on a space, skip spaces
+	for i < n {
+		c := line[i]
+		if c == ' ' || c == '\t' || c == '\n' {
+			i++
+		} else {
+			break
+		}
+	}
+	// If currently at a word, skip the word
+	for i < n && isWordByte(line[i]) {
+		i++
+	}
+	return i
+}
+
+func moveWordLeftLines(lines []string, row, col int) (int, int) {
+	if row < 0 || row >= len(lines) {
+		return row, col
+	}
+	if col > 0 {
+		return row, wordLeft(lines[row], col)
+	}
+	if row > 0 {
+		row--
+		return row, wordLeft(lines[row], len(lines[row]))
+	}
+	return row, col
+}
+
+func moveWordRightLines(lines []string, row, col int) (int, int) {
+	if row < 0 || row >= len(lines) {
+		return row, col
+	}
+	line := lines[row]
+	if col < len(line) {
+		return row, wordRight(line, col)
+	}
+	if row < len(lines)-1 {
+		row++
+		return row, wordRight(lines[row], 0)
+	}
+	return row, col
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -431,16 +514,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
+	case escTimeoutMsg:
+		if m.pendingEsc {
+			m.pendingEsc = false
+			return m, cleanupCmd(m)
+		}
+		return m, nil
 	case tea.KeyMsg:
+		// If we're in iteration or new-task screens, delegate
 		if m.screen == screenIteration {
 			return m.updateIteration(msg)
 		}
 		if m.screen == screenNewTask {
 			return m.updateNewTask(msg)
 		}
+
+		// Handle Alt-b / Alt-f or ESC+b / ESC+f before anything else
+		if (msg.Alt && len(msg.Runes) == 1 && (msg.Runes[0] == 'b' || msg.Runes[0] == 'f')) || (m.pendingEsc && len(msg.Runes) == 1 && (msg.Runes[0] == 'b' || msg.Runes[0] == 'f')) {
+			m.pendingEsc = false
+			if m.focus == focusBranch {
+				if msg.Runes[0] == 'b' {
+					m.branchCursor = wordLeft(m.branch, m.branchCursor)
+				} else {
+					m.branchCursor = wordRight(m.branch, m.branchCursor)
+				}
+				return m, nil
+			}
+			if m.focus == focusTask {
+				if msg.Runes[0] == 'b' {
+					m.taskCursor = wordLeft(m.task, m.taskCursor)
+				} else {
+					m.taskCursor = wordRight(m.task, m.taskCursor)
+				}
+				return m, nil
+			}
+			if m.focus == focusPrompt {
+				if msg.Runes[0] == 'b' {
+					m.cursor.row, m.cursor.col = moveWordLeftLines(m.input, m.cursor.row, m.cursor.col)
+				} else {
+					m.cursor.row, m.cursor.col = moveWordRightLines(m.input, m.cursor.row, m.cursor.col)
+				}
+				return m, nil
+			}
+			// If on provider/models, ignore
+			return m, nil
+		}
+
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case tea.KeyCtrlC:
 			return m, cleanupCmd(m)
+		case tea.KeyEsc:
+			// Start ESC timer to detect meta sequences
+			m.pendingEsc = true
+			return m, tea.Tick(escDelay, func(t time.Time) tea.Msg { return escTimeoutMsg{} })
 		case tea.KeyTab, tea.KeyShiftTab:
 			// Cycle focus among branch -> task -> prompt -> provider -> models -> branch
 			switch m.focus {
@@ -668,6 +794,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		default:
 			if len(msg.Runes) > 0 {
+				// Any other key cancels a pending ESC (we treat it as just ESC prefix)
+				if m.pendingEsc {
+					m.pendingEsc = false
+				}
 				r := string(msg.Runes)
 				if m.focus == focusBranch {
 					m.branch = m.branch[:m.branchCursor] + r + m.branch[m.branchCursor:]
@@ -694,8 +824,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
-	case tea.KeyCtrlC, tea.KeyEsc:
+	case tea.KeyCtrlC:
 		return m, cleanupCmd(m)
+	case tea.KeyEsc:
+		m.pendingEsc = true
+		return m, tea.Tick(escDelay, func(t time.Time) tea.Msg { return escTimeoutMsg{} })
 	case tea.KeyTab:
 		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
 			m.autocompleteIndex = (m.autocompleteIndex + 1) % len(m.autocompleteOptions)
@@ -856,6 +989,19 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.iterationInput[m.iterationCursor.row] = line[:m.iterationCursor.col] + " " + line[m.iterationCursor.col:]
 		m.iterationCursor.col++
 	default:
+		// Handle Alt-b / Alt-f or ESC+b / ESC+f for iteration input
+		if (msg.Alt && len(msg.Runes) == 1 && (msg.Runes[0] == 'b' || msg.Runes[0] == 'f')) || (m.pendingEsc && len(msg.Runes) == 1 && (msg.Runes[0] == 'b' || msg.Runes[0] == 'f')) {
+			m.pendingEsc = false
+			m.autocompleteActive = false
+			m.autocompleteOptions = nil
+			if msg.Runes[0] == 'b' {
+				m.iterationCursor.row, m.iterationCursor.col = moveWordLeftLines(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
+			} else {
+				m.iterationCursor.row, m.iterationCursor.col = moveWordRightLines(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
+			}
+			return m, nil
+		}
+
 		if len(msg.Runes) > 0 {
 			r := string(msg.Runes)
 			line := m.iterationInput[m.iterationCursor.row]
@@ -896,8 +1042,11 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
-	case tea.KeyCtrlC, tea.KeyEsc:
+	case tea.KeyCtrlC:
 		return m, cleanupCmd(m)
+	case tea.KeyEsc:
+		m.pendingEsc = true
+		return m, tea.Tick(escDelay, func(t time.Time) tea.Msg { return escTimeoutMsg{} })
 	case tea.KeyTab:
 		if m.newTaskFocus == focusTask {
 			m.newTaskFocus = focusPrompt
@@ -1010,6 +1159,28 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newTaskCursor.col++
 		return m, nil
 	default:
+		// Handle Alt-b / Alt-f or ESC+b / ESC+f in new task inputs
+		if (msg.Alt && len(msg.Runes) == 1 && (msg.Runes[0] == 'b' || msg.Runes[0] == 'f')) || (m.pendingEsc && len(msg.Runes) == 1 && (msg.Runes[0] == 'b' || msg.Runes[0] == 'f')) {
+			m.pendingEsc = false
+			if m.newTaskFocus == focusTask {
+				if msg.Runes[0] == 'b' {
+					m.newTaskNameCursor = wordLeft(m.newTaskName, m.newTaskNameCursor)
+				} else {
+					m.newTaskNameCursor = wordRight(m.newTaskName, m.newTaskNameCursor)
+				}
+				return m, nil
+			}
+			if m.newTaskFocus == focusPrompt {
+				if msg.Runes[0] == 'b' {
+					m.newTaskCursor.row, m.newTaskCursor.col = moveWordLeftLines(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
+				} else {
+					m.newTaskCursor.row, m.newTaskCursor.col = moveWordRightLines(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
+				}
+				return m, nil
+			}
+			return m, nil
+		}
+
 		if len(msg.Runes) > 0 {
 			r := string(msg.Runes)
 			if m.newTaskFocus == focusTask {
@@ -1025,129 +1196,350 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m model) getAutocompletePrefix(line string, cursorPos int) (string, int) {
-	if cursorPos > len(line) {
-		cursorPos = len(line)
-	}
+type escTimeoutMsg struct{}
 
-	// First: detect cases like "/next <partial>" or "/wrap <partial>" where the
-	// cursor is inside the model argument (after a space). We want to return a
-	// prefix that includes the command (so getAutocompleteOptions can detect the
-	// context) but return a start index that points to the beginning of the
-	// current token (so only the model name is replaced on completion).
-	curStart := cursorPos
-	for curStart > 0 && line[curStart-1] != ' ' && line[curStart-1] != '\t' && line[curStart-1] != '\n' {
-		curStart--
-	}
-	currentToken := line[curStart:cursorPos]
-
-	// find previous token (skip spaces backwards)
-	prevEnd := curStart - 1
-	for prevEnd >= 0 && (line[prevEnd] == ' ' || line[prevEnd] == '\t' || line[prevEnd] == '\n') {
-		prevEnd--
-	}
-	if prevEnd >= 0 {
-		prevStart := prevEnd
-		for prevStart > 0 && line[prevStart-1] != ' ' && line[prevStart-1] != '\t' && line[prevStart-1] != '\n' {
-			prevStart--
-		}
-		prevToken := line[prevStart : prevEnd+1]
-		if len(prevToken) > 0 && (prevToken[0] == '/' || prevToken[0] == '@') {
-			// return combined prefix (e.g. "/next gpt") but start at the current
-			// token so replacement only swaps the model name.
-			return prevToken + " " + currentToken, curStart
-		}
-	}
-
-	// Fallback to original behavior: detect if we're inside a token that starts
-	// with '/' or '@' (no space between command and cursor), or a contiguous
-	// token that contains '/' or '@' when scanning left.
-	start := cursorPos - 1
-	if start < 0 {
-		return "", 0
-	}
-
-	if line[start] == '/' || line[start] == '@' {
-		for start > 0 && line[start-1] != ' ' && line[start-1] != '\t' && line[start-1] != '\n' {
-			start--
-		}
-		return line[start:cursorPos], start
-	}
-
-	for start >= 0 && line[start] != ' ' && line[start] != '\t' && line[start] != '\n' {
-		if line[start] == '/' || line[start] == '@' {
-			return line[start:cursorPos], start
-		}
-		start--
-	}
-
-	return "", 0
+type panesOpenedMsg struct {
+	count      int
+	err        error
+	paneIDs    []string
+	worktrees  []string
+	modelNames []string
 }
 
-func (m model) getAutocompleteOptions(prefix string) []string {
-	if len(prefix) == 0 {
+type bailCompleteMsg struct{}
+
+type nextCompleteMsg struct{}
+
+type wrapCompleteMsg struct{}
+
+type cleanupCompleteMsg struct{}
+
+type cursorBlinkMsg struct{}
+
+type spinnerTickMsg struct{}
+
+func openPanesCmd(models []string, m model) tea.Cmd {
+	return func() tea.Msg {
+		if m.setDefault {
+			if err := saveDefaults(m.currentProvider(), m.selected); err != nil {
+				tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to save defaults: %s", err)})
+			} else {
+				tmux.RunCmd([]string{"display-message", "Saved provider and model defaults to .kaleidoscope"})
+			}
+		}
+
+		if !tmux.IsInsideTmux() {
+			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot open panes"})
+			return panesOpenedMsg{count: 0, err: fmt.Errorf("not inside tmux")}
+		}
+
+		// Create feature branch first
+		branchName := strings.TrimSpace(m.branch)
+		if branchName == "" {
+			return panesOpenedMsg{count: 0, err: fmt.Errorf("branch name is required")}
+		}
+
+		// Try to create the branch; if it already exists, just check it out
+		cmd := exec.Command("git", "checkout", "-b", branchName)
+		cmd.Run()
+		// Ignore errors - branch may already exist, in which case we'll checkout to it
+		cmd = exec.Command("git", "checkout", branchName)
+		cmd.Run()
+
+		// Capture the current pane id to restore focus later
+		paneOut, _, err := tmux.RunCmd([]string{"display-message", "-p", "#{pane_id}"})
+		if err != nil {
+			return panesOpenedMsg{count: 0, err: err}
+		}
+		origPaneID := strings.TrimSpace(paneOut)
+
+		opened := 0
+		var lastErr error
+		var paneIDs []string
+		var worktrees []string
+		var modelNames []string
+		for _, name := range models {
+			id := m.identifierFor(name)
+			// Use split-window to run the git commands in the new pane directly.
+			// Request the new pane id with -P -F "#{pane_id}" so we can target it if needed.
+			// Build command: add worktree from feature branch in parent directory, cd into it, then run opencode with provider/model and prompt
+			shellQuote := func(s string) string {
+				return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+			}
+			provider := m.currentProvider()
+			prompt := strings.Join(m.input, "\n")
+			modelFull := provider + "/" + name
+			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s %s || true; cd ../%s; opencode run -m %s %s; %s; exec $SHELL",
+				shellQuote(id), shellQuote(id), shellQuote(branchName), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), m.runCmd)
+			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			newPaneID := strings.TrimSpace(out)
+			paneIDs = append(paneIDs, newPaneID)
+			worktrees = append(worktrees, id)
+			modelNames = append(modelNames, name)
+			opened++
+		}
+
+		// Arrange panes nicely
+		_, _, _ = tmux.RunCmd([]string{"select-layout", "tiled"})
+
+		// Restore focus to the original pane
+		_, _, _ = tmux.RunCmd([]string{"select-pane", "-t", origPaneID})
+
+		// Inform in tmux status line
+		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Opened %d pane(s)", opened)})
+
+		return panesOpenedMsg{count: opened, err: lastErr, paneIDs: paneIDs, worktrees: worktrees, modelNames: modelNames}
+	}
+}
+
+func bailCmd(m model) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return bailCompleteMsg{}
+		}
+
+		for _, paneID := range m.createdPanes {
+			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			return bailCompleteMsg{}
+		}
+		parentDir := filepath.Dir(cwd)
+
+		for _, worktree := range m.createdWorktrees {
+			worktreePath := filepath.Join(parentDir, worktree)
+
+			cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
+			cmd.Run()
+
+			cmd = exec.Command("git", "branch", "-D", worktree)
+			cmd.Run()
+		}
+
+		tmux.RunCmd([]string{"display-message", "Bail complete: cleaned up panes, worktrees, and branches"})
+
+		return bailCompleteMsg{}
+	}
+}
+
+func nextCmd(m model, modelName string) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return bailCompleteMsg{}
+		}
+
+		worktree, ok := m.modelToWorktree[modelName]
+		if !ok {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
+			return bailCompleteMsg{}
+		}
+
+		if err := incrementChoice(m.currentProvider(), modelName); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
+			return bailCompleteMsg{}
+		}
+		parentDir := filepath.Dir(cwd)
+		worktreePath := filepath.Join(parentDir, worktree)
+
+		prompts := m.modelPrompts[modelName]
+		commitMessage := "Changes from " + modelName
+		if len(prompts) > 0 {
+			commitMessage += "\n\n"
+			for i, prompt := range prompts {
+				commitMessage += fmt.Sprintf("%d. %s\n", i+1, prompt)
+			}
+		}
+
+		cmd := exec.Command("git", "-C", worktreePath, "add", ".")
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "-C", worktreePath, "commit", "-m", commitMessage)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
+		}
+
+		featureBranch := strings.TrimSpace(m.branch)
+		cmd = exec.Command("git", "checkout", featureBranch)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "merge", "--no-ff", worktree, "-m", fmt.Sprintf("Merge changes from %s", modelName))
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "push", "origin", featureBranch)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
+		}
+
+		for _, paneID := range m.createdPanes {
+			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		}
+
+		for _, wt := range m.createdWorktrees {
+			wtPath := filepath.Join(parentDir, wt)
+			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
+			cmd.Run()
+
+			cmd = exec.Command("git", "branch", "-D", wt)
+			cmd.Run()
+		}
+
+		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Next complete: merged %s and cleaned up", modelName)})
+
+		return nextCompleteMsg{}
+	}
+}
+
+func wrapCmd(m model, modelName string) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return bailCompleteMsg{}
+		}
+
+		worktree, ok := m.modelToWorktree[modelName]
+		if !ok {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
+			return bailCompleteMsg{}
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
+			return bailCompleteMsg{}
+		}
+		parentDir := filepath.Dir(cwd)
+		worktreePath := filepath.Join(parentDir, worktree)
+
+		prompts := m.modelPrompts[modelName]
+		commitMessage := "Changes from " + modelName
+		if len(prompts) > 0 {
+			commitMessage += "\n\n"
+			for i, prompt := range prompts {
+				commitMessage += fmt.Sprintf("%d. %s\n", i+1, prompt)
+			}
+		}
+
+		cmd := exec.Command("git", "-C", worktreePath, "add", ".")
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "-C", worktreePath, "commit", "-m", commitMessage)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
+		}
+
+		featureBranch := strings.TrimSpace(m.branch)
+		cmd = exec.Command("git", "checkout", featureBranch)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "merge", "--no-ff", worktree, "-m", fmt.Sprintf("Merge changes from %s", modelName))
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
+			return bailCompleteMsg{}
+		}
+
+		cmd = exec.Command("git", "push", "origin", featureBranch)
+		if err := cmd.Run(); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
+		}
+
+		for _, paneID := range m.createdPanes {
+			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		}
+
+		for _, wt := range m.createdWorktrees {
+			wtPath := filepath.Join(parentDir, wt)
+			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
+			cmd.Run()
+
+			cmd = exec.Command("git", "branch", "-D", wt)
+			cmd.Run()
+		}
+
+		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Wrap complete: merged %s and cleaned up", modelName)})
+
+		return wrapCompleteMsg{}
+	}
+}
+
+func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return nil
+		}
+
+		shellQuote := func(s string) string {
+			return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+		}
+
+		provider := m.currentProvider()
+		modelFull := provider + "/" + modelName
+		bashCmd := fmt.Sprintf("opencode run -m %s %s", shellQuote(modelFull), shellQuote(prompt))
+
+		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, "C-c"})
+		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, bashCmd, "Enter"})
+		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Sent to @%s: %s", modelName, prompt)})
+
 		return nil
 	}
+}
 
-	// Slash-command completions. Support two modes:
-	// - completing the command itself (e.g. "/n" → "/next")
-	// - completing the argument to a command (e.g. "/next g" → model names)
-	if prefix[0] == '/' {
-		// If this looks like a command with an argument (contains a space), handle
-		// the "/next" and "/wrap" cases by returning available model names.
-		if strings.HasPrefix(prefix, "/next ") || strings.HasPrefix(prefix, "/wrap ") {
-			searchPrefix := ""
-			if len(prefix) > 6 {
-				// "/next " length is 6, "/wrap " length is 6 as well
-				// extract everything after the space
-				parts := strings.SplitN(prefix, " ", 2)
-				if len(parts) == 2 {
-					searchPrefix = parts[1]
-				}
-			}
-			// Prefer models that currently have worktrees (i.e., were opened).
-			var candidates []string
-			for modelName := range m.modelToWorktree {
-				candidates = append(candidates, modelName)
-			}
-			// Fallback to selected models if no worktrees known
-			if len(candidates) == 0 {
-				candidates = m.selectedModels()
-			}
-			var matches []string
-			for _, c := range candidates {
-				if strings.HasPrefix(c, searchPrefix) {
-					matches = append(matches, c)
-				}
-			}
-			return matches
+func cleanupCmd(m model) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			return cleanupCompleteMsg{}
 		}
 
-		// Otherwise complete top-level slash commands as before.
-		commands := []string{"/bail", "/next", "/wrap"}
-		var matches []string
-		for _, cmd := range commands {
-			if strings.HasPrefix(cmd, prefix) {
-				matches = append(matches, cmd)
-			}
+		for _, paneID := range m.createdPanes {
+			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
 		}
-		return matches
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			return cleanupCompleteMsg{}
+		}
+		parentDir := filepath.Dir(cwd)
+
+		for _, worktree := range m.createdWorktrees {
+			worktreePath := filepath.Join(parentDir, worktree)
+
+			cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
+			cmd.Run()
+
+			cmd = exec.Command("git", "branch", "-D", worktree)
+			cmd.Run()
+		}
+
+		if len(m.createdPanes) > 0 || len(m.createdWorktrees) > 0 {
+			tmux.RunCmd([]string{"display-message", "Cleanup complete: closed panes, removed worktrees and branches"})
+		}
+
+		return cleanupCompleteMsg{}
 	}
-
-	// @-mentions for sending input to a model
-	if prefix[0] == '@' {
-		var matches []string
-		models := m.selectedModels()
-		searchPrefix := prefix[1:]
-		for _, model := range models {
-			if strings.HasPrefix(model, searchPrefix) {
-				matches = append(matches, "@"+model)
-			}
-		}
-		return matches
-	}
-
-	return nil
 }
 
 func (m model) View() string {
@@ -1911,349 +2303,129 @@ func (m model) selectedModels() []string {
 	return out
 }
 
-// panesOpenedMsg reports how many panes were opened and any error
-type panesOpenedMsg struct {
-	count      int
-	err        error
-	paneIDs    []string
-	worktrees  []string
-	modelNames []string
-}
-
-type bailCompleteMsg struct{}
-
-type nextCompleteMsg struct{}
-
-type wrapCompleteMsg struct{}
-
-type cleanupCompleteMsg struct{}
-
-type cursorBlinkMsg struct{}
-
-type spinnerTickMsg struct{}
-
-func openPanesCmd(models []string, m model) tea.Cmd {
-	return func() tea.Msg {
-		if m.setDefault {
-			if err := saveDefaults(m.currentProvider(), m.selected); err != nil {
-				tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to save defaults: %s", err)})
-			} else {
-				tmux.RunCmd([]string{"display-message", "Saved provider and model defaults to .kaleidoscope"})
-			}
-		}
-
-		if !tmux.IsInsideTmux() {
-			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot open panes"})
-			return panesOpenedMsg{count: 0, err: fmt.Errorf("not inside tmux")}
-		}
-
-		// Create feature branch first
-		branchName := strings.TrimSpace(m.branch)
-		if branchName == "" {
-			return panesOpenedMsg{count: 0, err: fmt.Errorf("branch name is required")}
-		}
-
-		// Try to create the branch; if it already exists, just check it out
-		cmd := exec.Command("git", "checkout", "-b", branchName)
-		cmd.Run()
-		// Ignore errors - branch may already exist, in which case we'll checkout to it
-		cmd = exec.Command("git", "checkout", branchName)
-		cmd.Run()
-
-		// Capture the current pane id to restore focus later
-		paneOut, _, err := tmux.RunCmd([]string{"display-message", "-p", "#{pane_id}"})
-		if err != nil {
-			return panesOpenedMsg{count: 0, err: err}
-		}
-		origPaneID := strings.TrimSpace(paneOut)
-
-		opened := 0
-		var lastErr error
-		var paneIDs []string
-		var worktrees []string
-		var modelNames []string
-		for _, name := range models {
-			id := m.identifierFor(name)
-			// Use split-window to run the git commands in the new pane directly.
-			// Request the new pane id with -P -F "#{pane_id}" so we can target it if needed.
-			// Build command: add worktree from feature branch in parent directory, cd into it, then run opencode with provider/model and prompt
-			shellQuote := func(s string) string {
-				return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
-			}
-			provider := m.currentProvider()
-			prompt := strings.Join(m.input, "\n")
-			modelFull := provider + "/" + name
-			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s %s || true; cd ../%s; opencode run -m %s %s; %s; exec $SHELL",
-				shellQuote(id), shellQuote(id), shellQuote(branchName), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), m.runCmd)
-			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			newPaneID := strings.TrimSpace(out)
-			paneIDs = append(paneIDs, newPaneID)
-			worktrees = append(worktrees, id)
-			modelNames = append(modelNames, name)
-			opened++
-		}
-
-		// Arrange panes nicely
-		_, _, _ = tmux.RunCmd([]string{"select-layout", "tiled"})
-
-		// Restore focus to the original pane
-		_, _, _ = tmux.RunCmd([]string{"select-pane", "-t", origPaneID})
-
-		// Inform in tmux status line
-		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Opened %d pane(s)", opened)})
-
-		return panesOpenedMsg{count: opened, err: lastErr, paneIDs: paneIDs, worktrees: worktrees, modelNames: modelNames}
+func (m model) getAutocompletePrefix(line string, cursorPos int) (string, int) {
+	if cursorPos > len(line) {
+		cursorPos = len(line)
 	}
-}
 
-func bailCmd(m model) tea.Cmd {
-	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
-			return bailCompleteMsg{}
-		}
-
-		for _, paneID := range m.createdPanes {
-			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
-		}
-
-		cwd, err := os.Getwd()
-		if err != nil {
-			return bailCompleteMsg{}
-		}
-		parentDir := filepath.Dir(cwd)
-
-		for _, worktree := range m.createdWorktrees {
-			worktreePath := filepath.Join(parentDir, worktree)
-
-			cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
-			cmd.Run()
-
-			cmd = exec.Command("git", "branch", "-D", worktree)
-			cmd.Run()
-		}
-
-		tmux.RunCmd([]string{"display-message", "Bail complete: cleaned up panes, worktrees, and branches"})
-
-		return bailCompleteMsg{}
+	// First: detect cases like "/next <partial>" or "/wrap <partial>" where the
+	// cursor is inside the model argument (after a space). We want to return a
+	// prefix that includes the command (so getAutocompleteOptions can detect the
+	// context) but return a start index that points to the beginning of the
+	// current token (so only the model name is replaced on completion).
+	curStart := cursorPos
+	for curStart > 0 && line[curStart-1] != ' ' && line[curStart-1] != '\t' && line[curStart-1] != '\n' {
+		curStart--
 	}
-}
+	currentToken := line[curStart:cursorPos]
 
-func nextCmd(m model, modelName string) tea.Cmd {
-	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
-			return bailCompleteMsg{}
-		}
-
-		worktree, ok := m.modelToWorktree[modelName]
-		if !ok {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
-			return bailCompleteMsg{}
-		}
-
-		if err := incrementChoice(m.currentProvider(), modelName); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
-		}
-
-		cwd, err := os.Getwd()
-		if err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
-			return bailCompleteMsg{}
-		}
-		parentDir := filepath.Dir(cwd)
-		worktreePath := filepath.Join(parentDir, worktree)
-
-		prompts := m.modelPrompts[modelName]
-		commitMessage := "Changes from " + modelName
-		if len(prompts) > 0 {
-			commitMessage += "\n\n"
-			for i, prompt := range prompts {
-				commitMessage += fmt.Sprintf("%d. %s\n", i+1, prompt)
-			}
-		}
-
-		cmd := exec.Command("git", "-C", worktreePath, "add", ".")
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
-			return bailCompleteMsg{}
-		}
-
-		cmd = exec.Command("git", "-C", worktreePath, "commit", "-m", commitMessage)
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
-		}
-
-		featureBranch := strings.TrimSpace(m.branch)
-		cmd = exec.Command("git", "checkout", featureBranch)
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
-			return bailCompleteMsg{}
-		}
-
-		cmd = exec.Command("git", "merge", "--no-ff", worktree, "-m", fmt.Sprintf("Merge changes from %s", modelName))
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
-			return bailCompleteMsg{}
-		}
-
-		cmd = exec.Command("git", "push", "origin", featureBranch)
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
-		}
-
-		for _, paneID := range m.createdPanes {
-			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
-		}
-
-		for _, wt := range m.createdWorktrees {
-			wtPath := filepath.Join(parentDir, wt)
-			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
-			cmd.Run()
-
-			cmd = exec.Command("git", "branch", "-D", wt)
-			cmd.Run()
-		}
-
-		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Next complete: merged %s and cleaned up", modelName)})
-
-		return nextCompleteMsg{}
+	// find previous token (skip spaces backwards)
+	prevEnd := curStart - 1
+	for prevEnd >= 0 && (line[prevEnd] == ' ' || line[prevEnd] == '\t' || line[prevEnd] == '\n') {
+		prevEnd--
 	}
-}
-
-func wrapCmd(m model, modelName string) tea.Cmd {
-	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
-			return bailCompleteMsg{}
+	if prevEnd >= 0 {
+		prevStart := prevEnd
+		for prevStart > 0 && line[prevStart-1] != ' ' && line[prevStart-1] != '\t' && line[prevStart-1] != '\n' {
+			prevStart--
 		}
-
-		worktree, ok := m.modelToWorktree[modelName]
-		if !ok {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
-			return bailCompleteMsg{}
+		prevToken := line[prevStart : prevEnd+1]
+		if len(prevToken) > 0 && (prevToken[0] == '/' || prevToken[0] == '@') {
+			// return combined prefix (e.g. "/next gpt") but start at the current
+			// token so replacement only swaps the model name.
+			return prevToken + " " + currentToken, curStart
 		}
-
-		cwd, err := os.Getwd()
-		if err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
-			return bailCompleteMsg{}
-		}
-		parentDir := filepath.Dir(cwd)
-		worktreePath := filepath.Join(parentDir, worktree)
-
-		prompts := m.modelPrompts[modelName]
-		commitMessage := "Changes from " + modelName
-		if len(prompts) > 0 {
-			commitMessage += "\n\n"
-			for i, prompt := range prompts {
-				commitMessage += fmt.Sprintf("%d. %s\n", i+1, prompt)
-			}
-		}
-
-		cmd := exec.Command("git", "-C", worktreePath, "add", ".")
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
-			return bailCompleteMsg{}
-		}
-
-		cmd = exec.Command("git", "-C", worktreePath, "commit", "-m", commitMessage)
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
-		}
-
-		featureBranch := strings.TrimSpace(m.branch)
-		cmd = exec.Command("git", "checkout", featureBranch)
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
-			return bailCompleteMsg{}
-		}
-
-		cmd = exec.Command("git", "merge", "--no-ff", worktree, "-m", fmt.Sprintf("Merge changes from %s", modelName))
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
-			return bailCompleteMsg{}
-		}
-
-		cmd = exec.Command("git", "push", "origin", featureBranch)
-		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
-		}
-
-		for _, paneID := range m.createdPanes {
-			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
-		}
-
-		for _, wt := range m.createdWorktrees {
-			wtPath := filepath.Join(parentDir, wt)
-			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
-			cmd.Run()
-
-			cmd = exec.Command("git", "branch", "-D", wt)
-			cmd.Run()
-		}
-
-		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Wrap complete: merged %s and cleaned up", modelName)})
-
-		return wrapCompleteMsg{}
 	}
+
+	// Fallback to original behavior: detect if we're inside a token that starts
+	// with '/' or '@' (no space between command and cursor), or a contiguous
+	// token that contains '/' or '@' when scanning left.
+	start := cursorPos - 1
+	if start < 0 {
+		return "", 0
+	}
+
+	if line[start] == '/' || line[start] == '@' {
+		for start > 0 && line[start-1] != ' ' && line[start-1] != '\t' && line[start-1] != '\n' {
+			start--
+		}
+		return line[start:cursorPos], start
+	}
+
+	for start >= 0 && line[start] != ' ' && line[start] != '\t' && line[start] != '\n' {
+		if line[start] == '/' || line[start] == '@' {
+			return line[start:cursorPos], start
+		}
+		start--
+	}
+
+	return "", 0
 }
 
-func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model) tea.Cmd {
-	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
-			return nil
-		}
-
-		shellQuote := func(s string) string {
-			return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
-		}
-
-		provider := m.currentProvider()
-		modelFull := provider + "/" + modelName
-		bashCmd := fmt.Sprintf("opencode run -m %s %s", shellQuote(modelFull), shellQuote(prompt))
-
-		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, "C-c"})
-		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, bashCmd, "Enter"})
-		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Sent to @%s: %s", modelName, prompt)})
-
+func (m model) getAutocompleteOptions(prefix string) []string {
+	if len(prefix) == 0 {
 		return nil
 	}
-}
 
-func cleanupCmd(m model) tea.Cmd {
-	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
-			return cleanupCompleteMsg{}
+	// Slash-command completions. Support two modes:
+	// - completing the command itself (e.g. "/n" → "/next")
+	// - completing the argument to a command (e.g. "/next g" → model names)
+	if prefix[0] == '/' {
+		// If this looks like a command with an argument (contains a space), handle
+		// the "/next" and "/wrap" cases by returning available model names.
+		if strings.HasPrefix(prefix, "/next ") || strings.HasPrefix(prefix, "/wrap ") {
+			searchPrefix := ""
+			if len(prefix) > 6 {
+				// "/next " length is 6, "/wrap " length is 6 as well
+				// extract everything after the space
+				parts := strings.SplitN(prefix, " ", 2)
+				if len(parts) == 2 {
+					searchPrefix = parts[1]
+				}
+			}
+			// Prefer models that currently have worktrees (i.e., were opened).
+			var candidates []string
+			for modelName := range m.modelToWorktree {
+				candidates = append(candidates, modelName)
+			}
+			// Fallback to selected models if no worktrees known
+			if len(candidates) == 0 {
+				candidates = m.selectedModels()
+			}
+			var matches []string
+			for _, c := range candidates {
+				if strings.HasPrefix(c, searchPrefix) {
+					matches = append(matches, c)
+				}
+			}
+			return matches
 		}
 
-		for _, paneID := range m.createdPanes {
-			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		// Otherwise complete top-level slash commands as before.
+		commands := []string{"/bail", "/next", "/wrap"}
+		var matches []string
+		for _, cmd := range commands {
+			if strings.HasPrefix(cmd, prefix) {
+				matches = append(matches, cmd)
+			}
 		}
-
-		cwd, err := os.Getwd()
-		if err != nil {
-			return cleanupCompleteMsg{}
-		}
-		parentDir := filepath.Dir(cwd)
-
-		for _, worktree := range m.createdWorktrees {
-			worktreePath := filepath.Join(parentDir, worktree)
-
-			cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
-			cmd.Run()
-
-			cmd = exec.Command("git", "branch", "-D", worktree)
-			cmd.Run()
-		}
-
-		if len(m.createdPanes) > 0 || len(m.createdWorktrees) > 0 {
-			tmux.RunCmd([]string{"display-message", "Cleanup complete: closed panes, removed worktrees and branches"})
-		}
-
-		return cleanupCompleteMsg{}
+		return matches
 	}
+
+	// @-mentions for sending input to a model
+	if prefix[0] == '@' {
+		var matches []string
+		models := m.selectedModels()
+		searchPrefix := prefix[1:]
+		for _, model := range models {
+			if strings.HasPrefix(model, searchPrefix) {
+				matches = append(matches, "@"+model)
+			}
+		}
+		return matches
+	}
+
+	return nil
 }
 
 func main() {

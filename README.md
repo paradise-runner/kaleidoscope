@@ -65,7 +65,8 @@ Navigate with:
 - `↑↓`: Navigate dropdowns and multi-line text
 - `Space`: Toggle model selection
 - `Enter`: Submit (creates worktrees and opens panes)
-- `Ctrl+C` or `Esc`: Cancel and cleanup
+- `Ctrl+C` or `Esc`: Cancel and cleanup (press Esc once)
+- `Alt+b` / `Alt+f` (or `Esc` then `b`/`f` quickly): Move cursor by word in all text inputs
 
 ### Iteration Commands
 
