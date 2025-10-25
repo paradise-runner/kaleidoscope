@@ -2239,7 +2239,8 @@ func (m model) viewIteration() string {
 
 	label := lipgloss.NewStyle().Faint(true).Render("iteration prompt")
 	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /next <instance> /wrap <instance> | @<instance> <prompt>")
-	promptView := label + "\n" + promptBox.Render(pb.String()) + "\n" + hint
+	tmuxHint := lipgloss.NewStyle().Faint(true).Render("tmux: Ctrl-b then arrow keys to move between panes")
+	promptView := label + "\n" + promptBox.Render(pb.String()) + "\n" + hint + "\n" + tmuxHint
 
 	if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
 		var acList strings.Builder
