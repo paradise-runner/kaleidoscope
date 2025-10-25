@@ -506,6 +506,23 @@ func lineRight(lines []string, row, col int) (int, int) {
 	return row, col
 }
 
+func deleteWordBackward(line string, col int) (newLine string, newCol int) {
+	if col <= 0 {
+		return line, col
+	}
+	newCol = wordLeft(line, col)
+	newLine = line[:newCol] + line[col:]
+	return newLine, newCol
+}
+
+func deleteLineBackward(line string, col int) (newLine string, newCol int) {
+	if col <= 0 {
+		return line, col
+	}
+	newLine = line[col:]
+	return newLine, 0
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case cursorBlinkMsg:
@@ -726,6 +743,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case tea.KeyBackspace:
+			if msg.Alt {
+				// OPTION+delete: delete word backward
+				if m.focus == focusBranch {
+					m.branch, m.branchCursor = deleteWordBackward(m.branch, m.branchCursor)
+					return m, nil
+				}
+				if m.focus == focusTask {
+					m.task, m.taskCursor = deleteWordBackward(m.task, m.taskCursor)
+					return m, nil
+				}
+				if m.focus == focusPrompt {
+					line := m.input[m.cursor.row]
+					m.input[m.cursor.row], m.cursor.col = deleteWordBackward(line, m.cursor.col)
+					return m, nil
+				}
+				return m, nil
+			}
+			// CMD+delete on macOS is handled via KeyCtrlU (Ctrl-U typically deletes line backward)
 			if m.focus == focusBranch {
 				if m.branchCursor > 0 && len(m.branch) > 0 {
 					m.branch = m.branch[:m.branchCursor-1] + m.branch[m.branchCursor:]
@@ -765,6 +800,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor.row--
 				m.cursor.col = len(prev)
 			}
+		case tea.KeyCtrlU:
+			// CMD+delete: delete line backward (Ctrl-U is standard terminal binding)
+			if m.focus == focusBranch {
+				m.branch, m.branchCursor = deleteLineBackward(m.branch, m.branchCursor)
+				return m, nil
+			}
+			if m.focus == focusTask {
+				m.task, m.taskCursor = deleteLineBackward(m.task, m.taskCursor)
+				return m, nil
+			}
+			if m.focus == focusPrompt {
+				line := m.input[m.cursor.row]
+				m.input[m.cursor.row], m.cursor.col = deleteLineBackward(line, m.cursor.col)
+				return m, nil
+			}
+			return m, nil
 		case tea.KeyLeft:
 			if m.focus == focusBranch {
 				if m.branchCursor > 0 {
@@ -974,6 +1025,14 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.iterationCursor.col = 0
 		}
 	case tea.KeyBackspace:
+		if msg.Alt {
+			// OPTION+delete: delete word backward
+			m.autocompleteActive = false
+			m.autocompleteOptions = nil
+			line := m.iterationInput[m.iterationCursor.row]
+			m.iterationInput[m.iterationCursor.row], m.iterationCursor.col = deleteWordBackward(line, m.iterationCursor.col)
+			return m, nil
+		}
 		if m.iterationCursor.col > 0 {
 			line := m.iterationInput[m.iterationCursor.row]
 			m.iterationInput[m.iterationCursor.row] = line[:m.iterationCursor.col-1] + line[m.iterationCursor.col:]
@@ -1008,6 +1067,13 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.iterationCursor.row--
 			m.iterationCursor.col = len(prev)
 		}
+	case tea.KeyCtrlU:
+		// CMD+delete: delete line backward
+		m.autocompleteActive = false
+		m.autocompleteOptions = nil
+		line := m.iterationInput[m.iterationCursor.row]
+		m.iterationInput[m.iterationCursor.row], m.iterationCursor.col = deleteLineBackward(line, m.iterationCursor.col)
+		return m, nil
 	case tea.KeyLeft:
 		m.autocompleteActive = false
 		m.autocompleteOptions = nil
@@ -1167,6 +1233,16 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.newTaskCursor.col = 0
 		return m, nil
 	case tea.KeyBackspace:
+		if msg.Alt {
+			// OPTION+delete: delete word backward
+			if m.newTaskFocus == focusTask {
+				m.newTaskName, m.newTaskNameCursor = deleteWordBackward(m.newTaskName, m.newTaskNameCursor)
+				return m, nil
+			}
+			line := m.newTaskPrompt[m.newTaskCursor.row]
+			m.newTaskPrompt[m.newTaskCursor.row], m.newTaskCursor.col = deleteWordBackward(line, m.newTaskCursor.col)
+			return m, nil
+		}
 		if m.newTaskFocus == focusTask {
 			if m.newTaskNameCursor > 0 && len(m.newTaskName) > 0 {
 				m.newTaskName = m.newTaskName[:m.newTaskNameCursor-1] + m.newTaskName[m.newTaskNameCursor:]
@@ -1186,6 +1262,15 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.newTaskCursor.row--
 			m.newTaskCursor.col = len(prev)
 		}
+		return m, nil
+	case tea.KeyCtrlU:
+		// CMD+delete: delete line backward
+		if m.newTaskFocus == focusTask {
+			m.newTaskName, m.newTaskNameCursor = deleteLineBackward(m.newTaskName, m.newTaskNameCursor)
+			return m, nil
+		}
+		line := m.newTaskPrompt[m.newTaskCursor.row]
+		m.newTaskPrompt[m.newTaskCursor.row], m.newTaskCursor.col = deleteLineBackward(line, m.newTaskCursor.col)
 		return m, nil
 	case tea.KeyLeft:
 		if m.newTaskFocus == focusTask {
