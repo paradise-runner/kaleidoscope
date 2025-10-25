@@ -72,8 +72,8 @@ Navigate with:
 Once models are running in separate panes, you can use these commands in the iteration prompt:
 
 - `/bail`: Cancel everything and cleanup all panes, worktrees, and branches
-- `/choose <model>`: Merge the specified model's changes to the feature branch, push, and cleanup
-- `/wrap <model>`: Similar to choose, but returns to new task screen instead of exiting
+- `/next <model>`: Merge the specified model's changes to the feature branch, push, and cleanup
+- `/wrap <model>`: Similar to next, but returns to new task screen instead of exiting
 - `@<model> <prompt>`: Send a follow-up prompt to a specific model
 
 Example:
@@ -92,7 +92,7 @@ kaleidoscope --run "npm test" --set-default
 This creates a `.kaleidoscope` file in your current directory with your preferences. The file includes:
 - Default provider
 - Selected models per provider
-- Usage statistics for each model (tracked when using `/choose`)
+- Usage statistics for each model (tracked when using `/next`)
 
 ## Configuration
 
@@ -137,7 +137,7 @@ The `.kaleidoscope` file is a JSON file storing:
 
 6. Choose the best solution:
    ```
-   /choose claude-sonnet-4.5
+   /next claude-sonnet-4.5
    ```
 
 7. Kaleidoscope commits changes, merges to feature branch, pushes, and cleans up
@@ -148,7 +148,7 @@ The `.kaleidoscope` file is a JSON file storing:
 2. **Worktrees**: For each selected model, creates a git worktree in `../<repo>-<branch>-<task>-<model>/`
 3. **Execution**: Opens a tmux pane for each worktree and runs `opencode run -m <provider>/<model> <prompt>`
 4. **Iteration**: Allows sending additional prompts to specific models
-5. **Selection**: When you `/choose` a model:
+5. **Selection**: When you `/next` a model:
    - Commits all changes in that model's worktree
    - Merges to the feature branch with `--no-ff`
    - Pushes to origin

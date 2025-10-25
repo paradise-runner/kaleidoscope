@@ -407,7 +407,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(time.Millisecond*100, func(t time.Time) tea.Msg { return spinnerTickMsg{} })
 	case bailCompleteMsg:
 		return m, tea.Quit
-	case chooseCompleteMsg:
+	case nextCompleteMsg:
 		m.screen = screenNewTask
 		m.newTaskFocus = focusTask
 		return m, nil
@@ -730,12 +730,12 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, bailCmd(m)
 			}
 
-			if strings.HasPrefix(currentLine, "/choose ") {
-				modelName := strings.TrimSpace(strings.TrimPrefix(currentLine, "/choose "))
+			if strings.HasPrefix(currentLine, "/next ") {
+				modelName := strings.TrimSpace(strings.TrimPrefix(currentLine, "/next "))
 				if modelName != "" {
 					m.screen = screenProgress
 					m.progressMsg = fmt.Sprintf("Merging and pushing changes from %s...", modelName)
-					return m, chooseCmd(m, modelName)
+					return m, nextCmd(m, modelName)
 				}
 			}
 
@@ -1055,7 +1055,7 @@ func (m model) getAutocompleteOptions(prefix string) []string {
 	}
 
 	if prefix[0] == '/' {
-		commands := []string{"/bail", "/choose", "/wrap"}
+		commands := []string{"/bail", "/next", "/wrap"}
 		var matches []string
 		for _, cmd := range commands {
 			if strings.HasPrefix(cmd, prefix) {
@@ -1339,7 +1339,7 @@ func (m model) viewIteration() string {
 		Padding(1, 2)
 
 	label := lipgloss.NewStyle().Faint(true).Render("iteration prompt")
-	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /choose <model> /wrap <model> | @<model> <prompt>")
+	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /next <model> /wrap <model> | @<model> <prompt>")
 	promptView := label + "\n" + promptBox.Render(pb.String()) + "\n" + hint
 
 	if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
@@ -1491,9 +1491,9 @@ func highlightCommandLine(line string, selectedModels []string) string {
 	atStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6BCB77")).Bold(true)
 
 	validSlashCommands := map[string]bool{
-		"/bail":   true,
-		"/choose": true,
-		"/wrap":   true,
+		"/bail": true,
+		"/next": true,
+		"/wrap": true,
 	}
 
 	modelSet := make(map[string]bool)
@@ -1852,7 +1852,7 @@ type panesOpenedMsg struct {
 
 type bailCompleteMsg struct{}
 
-type chooseCompleteMsg struct{}
+type nextCompleteMsg struct{}
 
 type wrapCompleteMsg struct{}
 
@@ -1972,7 +1972,7 @@ func bailCmd(m model) tea.Cmd {
 	}
 }
 
-func chooseCmd(m model, modelName string) tea.Cmd {
+func nextCmd(m model, modelName string) tea.Cmd {
 	return func() tea.Msg {
 		if !tmux.IsInsideTmux() {
 			return bailCompleteMsg{}
@@ -2047,9 +2047,9 @@ func chooseCmd(m model, modelName string) tea.Cmd {
 			cmd.Run()
 		}
 
-		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Choose complete: merged %s and cleaned up", modelName)})
+		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Next complete: merged %s and cleaned up", modelName)})
 
-		return chooseCompleteMsg{}
+		return nextCompleteMsg{}
 	}
 }
 
