@@ -755,6 +755,9 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					prompt := parts[1]
 					if paneID, ok := m.modelToPaneID[modelName]; ok {
 						m.modelPrompts[modelName] = append(m.modelPrompts[modelName], prompt)
+						m.iterationInput = []string{""}
+						m.iterationCursor.row = 0
+						m.iterationCursor.col = 0
 						return m, sendToModelPaneCmd(paneID, modelName, prompt, m)
 					}
 				}
