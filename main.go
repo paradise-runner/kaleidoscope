@@ -476,6 +476,36 @@ func moveWordRightLines(lines []string, row, col int) (int, int) {
 	return row, col
 }
 
+// Line navigation helpers: jump to start/end of line,
+// and traverse to previous/next line when already at boundary.
+func lineLeft(lines []string, row, col int) (int, int) {
+	if row < 0 || row >= len(lines) {
+		return row, col
+	}
+	if col > 0 {
+		return row, 0
+	}
+	if row > 0 {
+		return row - 1, 0
+	}
+	return row, col
+}
+
+func lineRight(lines []string, row, col int) (int, int) {
+	if row < 0 || row >= len(lines) {
+		return row, col
+	}
+	lineLen := len(lines[row])
+	if col < lineLen {
+		return row, lineLen
+	}
+	if row < len(lines)-1 {
+		row++
+		return row, len(lines[row])
+	}
+	return row, col
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case cursorBlinkMsg:
@@ -567,6 +597,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Start ESC timer to detect meta sequences
 			m.pendingEsc = true
 			return m, tea.Tick(escDelay, func(t time.Time) tea.Msg { return escTimeoutMsg{} })
+		case tea.KeyCtrlA, tea.KeyHome:
+			// Cmd-like: jump to start of line; if already at start, go to previous line start
+			if m.focus == focusBranch {
+				m.branchCursor = 0
+				return m, nil
+			}
+			if m.focus == focusTask {
+				m.taskCursor = 0
+				return m, nil
+			}
+			if m.focus == focusPrompt {
+				m.cursor.row, m.cursor.col = lineLeft(m.input, m.cursor.row, m.cursor.col)
+				return m, nil
+			}
+			return m, nil
+		case tea.KeyCtrlE, tea.KeyEnd:
+			// Cmd-like: jump to end of line; if already at end, go to next line end
+			if m.focus == focusBranch {
+				m.branchCursor = len(m.branch)
+				return m, nil
+			}
+			if m.focus == focusTask {
+				m.taskCursor = len(m.task)
+				return m, nil
+			}
+			if m.focus == focusPrompt {
+				m.cursor.row, m.cursor.col = lineRight(m.input, m.cursor.row, m.cursor.col)
+				return m, nil
+			}
+			return m, nil
 		case tea.KeyTab, tea.KeyShiftTab:
 			// Cycle focus among branch -> task -> prompt -> provider -> models -> branch
 			switch m.focus {
@@ -829,6 +889,16 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m.pendingEsc = true
 		return m, tea.Tick(escDelay, func(t time.Time) tea.Msg { return escTimeoutMsg{} })
+	case tea.KeyCtrlA, tea.KeyHome:
+		m.autocompleteActive = false
+		m.autocompleteOptions = nil
+		m.iterationCursor.row, m.iterationCursor.col = lineLeft(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
+		return m, nil
+	case tea.KeyCtrlE, tea.KeyEnd:
+		m.autocompleteActive = false
+		m.autocompleteOptions = nil
+		m.iterationCursor.row, m.iterationCursor.col = lineRight(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
+		return m, nil
 	case tea.KeyTab:
 		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
 			m.autocompleteIndex = (m.autocompleteIndex + 1) % len(m.autocompleteOptions)
@@ -1047,6 +1117,20 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		m.pendingEsc = true
 		return m, tea.Tick(escDelay, func(t time.Time) tea.Msg { return escTimeoutMsg{} })
+	case tea.KeyCtrlA, tea.KeyHome:
+		if m.newTaskFocus == focusTask {
+			m.newTaskNameCursor = 0
+			return m, nil
+		}
+		m.newTaskCursor.row, m.newTaskCursor.col = lineLeft(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
+		return m, nil
+	case tea.KeyCtrlE, tea.KeyEnd:
+		if m.newTaskFocus == focusTask {
+			m.newTaskNameCursor = len(m.newTaskName)
+			return m, nil
+		}
+		m.newTaskCursor.row, m.newTaskCursor.col = lineRight(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
+		return m, nil
 	case tea.KeyTab:
 		if m.newTaskFocus == focusTask {
 			m.newTaskFocus = focusPrompt
