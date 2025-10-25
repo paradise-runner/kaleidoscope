@@ -18,6 +18,7 @@ import (
 )
 
 const escDelay = 150 * time.Millisecond
+const historyMax = 20
 
 type kaleidoscopeDefaults struct {
 	Provider string                    `json:"provider"`
@@ -121,6 +122,54 @@ func saveDefaults(provider string, selected map[string]map[string]bool) error {
 	}
 
 	return os.WriteFile(configPath, data, 0644)
+}
+
+// History helpers - per-repo history stored in JSON array at .kaleidoscope_history.json
+func historyFilePath() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ".kaleidoscope_history.json"
+	}
+	return filepath.Join(cwd, ".kaleidoscope_history.json")
+}
+
+func loadHistoryForRepo() []string {
+	path := historyFilePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var h []string
+	if err := json.Unmarshal(data, &h); err != nil {
+		return nil
+	}
+	return h
+}
+
+func saveHistoryForRepo(h []string) error {
+	path := historyFilePath()
+	data, err := json.MarshalIndent(h, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// pushHistorySlice prepends a new entry (most-recent-first), dedupes immediate duplicate,
+// and trims the slice to historyMax.
+func pushHistorySlice(h []string, entry string) []string {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return h
+	}
+	if len(h) > 0 && h[0] == entry {
+		return h
+	}
+	newH := append([]string{entry}, h...)
+	if len(newH) > historyMax {
+		newH = newH[:historyMax]
+	}
+	return newH
 }
 
 // identifier composes the current folder (repo) + branch + task + first selected model
@@ -294,6 +343,17 @@ type model struct {
 
 	// Pending ESC to detect Alt sequences
 	pendingEsc bool
+
+	// Message history (per-repo). `history` holds most-recent-first order.
+	history []string
+	// historyIndex is -1 when not navigating; otherwise index into history (0 = most recent)
+	historyIndex int
+	// iterationHistoryIndex is for the iteration prompt navigation
+	iterationHistoryIndex int
+	// Drafts saved when the user begins history navigation so pressing Down restores
+	// their in-progress input.
+	draftInput          []string
+	draftIterationInput []string
 }
 
 func initialModel(runCmd string, setDefault bool) model {
@@ -374,6 +434,15 @@ func initialModel(runCmd string, setDefault bool) model {
 		progressMsg:      "",
 		pendingEsc:       false,
 	}
+	// Load per-repo history and initialize indices/drafts
+	m.history = loadHistoryForRepo()
+	if m.history == nil {
+		m.history = []string{}
+	}
+	m.historyIndex = -1
+	m.iterationHistoryIndex = -1
+	m.draftInput = nil
+	m.draftIterationInput = nil
 	return m
 }
 
@@ -551,6 +620,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.createdPanes = append(m.createdPanes, msg.paneIDs...)
 			m.createdWorktrees = append(m.createdWorktrees, msg.worktrees...)
 			initialPrompt := strings.TrimSpace(strings.Join(m.input, "\n"))
+			// Push to history and persist
+			m.history = pushHistorySlice(m.history, initialPrompt)
+			_ = saveHistoryForRepo(m.history)
 			for i, modelName := range msg.modelNames {
 				m.modelToPaneID[modelName] = msg.paneIDs[i]
 				m.modelToWorktree[modelName] = msg.worktrees[i]
@@ -858,7 +930,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.KeyUp:
 			if m.focus == focusPrompt {
-				if m.cursor.row > 0 {
+				// History navigation: on first Up, save draft and load most recent
+				if len(m.history) > 0 {
+					if m.historyIndex == -1 {
+						m.draftInput = append([]string{}, m.input...)
+						m.historyIndex = 0
+						entry := m.history[m.historyIndex]
+						m.input = strings.Split(entry, "\n")
+						m.cursor.row = len(m.input) - 1
+						m.cursor.col = len(m.input[m.cursor.row])
+					} else if m.historyIndex < len(m.history)-1 {
+						m.historyIndex++
+						entry := m.history[m.historyIndex]
+						m.input = strings.Split(entry, "\n")
+						m.cursor.row = len(m.input) - 1
+						m.cursor.col = len(m.input[m.cursor.row])
+					}
+				} else if m.cursor.row > 0 {
 					m.cursor.row--
 					if m.cursor.col > len(m.input[m.cursor.row]) {
 						m.cursor.col = len(m.input[m.cursor.row])
@@ -881,7 +969,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.KeyDown:
 			if m.focus == focusPrompt {
-				if m.cursor.row < len(m.input)-1 {
+				// If navigating history, move younger; when exiting, restore draft
+				if m.historyIndex != -1 {
+					if m.historyIndex > 0 {
+						m.historyIndex--
+						entry := m.history[m.historyIndex]
+						m.input = strings.Split(entry, "\n")
+						m.cursor.row = len(m.input) - 1
+						m.cursor.col = len(m.input[m.cursor.row])
+					} else {
+						// historyIndex == 0 -> restore draft
+						m.historyIndex = -1
+						if m.draftInput != nil {
+							m.input = append([]string{}, m.draftInput...)
+						} else {
+							m.input = []string{""}
+						}
+						m.cursor.row = len(m.input) - 1
+						m.cursor.col = len(m.input[m.cursor.row])
+					}
+				} else if m.cursor.row < len(m.input)-1 {
 					m.cursor.row++
 					if m.cursor.col > len(m.input[m.cursor.row]) {
 						m.cursor.col = len(m.input[m.cursor.row])
@@ -1009,6 +1116,9 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					prompt := parts[1]
 					if paneID, ok := m.modelToPaneID[modelName]; ok {
 						m.modelPrompts[modelName] = append(m.modelPrompts[modelName], prompt)
+						// Push to per-repo history and persist
+						m.history = pushHistorySlice(m.history, prompt)
+						_ = saveHistoryForRepo(m.history)
 						m.iterationInput = []string{""}
 						m.iterationCursor.row = 0
 						m.iterationCursor.col = 0
@@ -1100,7 +1210,28 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.autocompleteIndex = len(m.autocompleteOptions) - 1
 			}
 		} else {
-			if m.iterationCursor.row > 0 {
+			// Iteration prompt history navigation: on first Up, save draft and load most recent
+			if len(m.history) > 0 {
+				if m.iterationHistoryIndex == -1 {
+					m.draftIterationInput = append([]string{}, m.iterationInput...)
+					m.iterationHistoryIndex = 0
+					entry := m.history[m.iterationHistoryIndex]
+					m.iterationInput = strings.Split(entry, "\n")
+					m.iterationCursor.row = len(m.iterationInput) - 1
+					m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
+				} else if m.iterationHistoryIndex < len(m.history)-1 {
+					m.iterationHistoryIndex++
+					entry := m.history[m.iterationHistoryIndex]
+					m.iterationInput = strings.Split(entry, "\n")
+					m.iterationCursor.row = len(m.iterationInput) - 1
+					m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
+				} else if m.iterationCursor.row > 0 {
+					m.iterationCursor.row--
+					if m.iterationCursor.col > len(m.iterationInput[m.iterationCursor.row]) {
+						m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
+					}
+				}
+			} else if m.iterationCursor.row > 0 {
 				m.iterationCursor.row--
 				if m.iterationCursor.col > len(m.iterationInput[m.iterationCursor.row]) {
 					m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
@@ -1111,7 +1242,25 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
 			m.autocompleteIndex = (m.autocompleteIndex + 1) % len(m.autocompleteOptions)
 		} else {
-			if m.iterationCursor.row < len(m.iterationInput)-1 {
+			// Iteration prompt history down: move toward newer entries; restore draft when exiting
+			if m.iterationHistoryIndex != -1 {
+				if m.iterationHistoryIndex > 0 {
+					m.iterationHistoryIndex--
+					entry := m.history[m.iterationHistoryIndex]
+					m.iterationInput = strings.Split(entry, "\n")
+					m.iterationCursor.row = len(m.iterationInput) - 1
+					m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
+				} else {
+					m.iterationHistoryIndex = -1
+					if m.draftIterationInput != nil {
+						m.iterationInput = append([]string{}, m.draftIterationInput...)
+					} else {
+						m.iterationInput = []string{""}
+					}
+					m.iterationCursor.row = len(m.iterationInput) - 1
+					m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
+				}
+			} else if m.iterationCursor.row < len(m.iterationInput)-1 {
 				m.iterationCursor.row++
 				if m.iterationCursor.col > len(m.iterationInput[m.iterationCursor.row]) {
 					m.iterationCursor.col = len(m.iterationInput[m.iterationCursor.row])
