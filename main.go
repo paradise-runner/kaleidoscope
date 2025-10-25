@@ -1030,6 +1030,38 @@ func (m model) getAutocompletePrefix(line string, cursorPos int) (string, int) {
 		cursorPos = len(line)
 	}
 
+	// First: detect cases like "/next <partial>" or "/wrap <partial>" where the
+	// cursor is inside the model argument (after a space). We want to return a
+	// prefix that includes the command (so getAutocompleteOptions can detect the
+	// context) but return a start index that points to the beginning of the
+	// current token (so only the model name is replaced on completion).
+	curStart := cursorPos
+	for curStart > 0 && line[curStart-1] != ' ' && line[curStart-1] != '\t' && line[curStart-1] != '\n' {
+		curStart--
+	}
+	currentToken := line[curStart:cursorPos]
+
+	// find previous token (skip spaces backwards)
+	prevEnd := curStart - 1
+	for prevEnd >= 0 && (line[prevEnd] == ' ' || line[prevEnd] == '\t' || line[prevEnd] == '\n') {
+		prevEnd--
+	}
+	if prevEnd >= 0 {
+		prevStart := prevEnd
+		for prevStart > 0 && line[prevStart-1] != ' ' && line[prevStart-1] != '\t' && line[prevStart-1] != '\n' {
+			prevStart--
+		}
+		prevToken := line[prevStart : prevEnd+1]
+		if len(prevToken) > 0 && (prevToken[0] == '/' || prevToken[0] == '@') {
+			// return combined prefix (e.g. "/next gpt") but start at the current
+			// token so replacement only swaps the model name.
+			return prevToken + " " + currentToken, curStart
+		}
+	}
+
+	// Fallback to original behavior: detect if we're inside a token that starts
+	// with '/' or '@' (no space between command and cursor), or a contiguous
+	// token that contains '/' or '@' when scanning left.
 	start := cursorPos - 1
 	if start < 0 {
 		return "", 0
@@ -1057,7 +1089,41 @@ func (m model) getAutocompleteOptions(prefix string) []string {
 		return nil
 	}
 
+	// Slash-command completions. Support two modes:
+	// - completing the command itself (e.g. "/n" → "/next")
+	// - completing the argument to a command (e.g. "/next g" → model names)
 	if prefix[0] == '/' {
+		// If this looks like a command with an argument (contains a space), handle
+		// the "/next" and "/wrap" cases by returning available model names.
+		if strings.HasPrefix(prefix, "/next ") || strings.HasPrefix(prefix, "/wrap ") {
+			searchPrefix := ""
+			if len(prefix) > 6 {
+				// "/next " length is 6, "/wrap " length is 6 as well
+				// extract everything after the space
+				parts := strings.SplitN(prefix, " ", 2)
+				if len(parts) == 2 {
+					searchPrefix = parts[1]
+				}
+			}
+			// Prefer models that currently have worktrees (i.e., were opened).
+			var candidates []string
+			for modelName := range m.modelToWorktree {
+				candidates = append(candidates, modelName)
+			}
+			// Fallback to selected models if no worktrees known
+			if len(candidates) == 0 {
+				candidates = m.selectedModels()
+			}
+			var matches []string
+			for _, c := range candidates {
+				if strings.HasPrefix(c, searchPrefix) {
+					matches = append(matches, c)
+				}
+			}
+			return matches
+		}
+
+		// Otherwise complete top-level slash commands as before.
 		commands := []string{"/bail", "/next", "/wrap"}
 		var matches []string
 		for _, cmd := range commands {
@@ -1068,6 +1134,7 @@ func (m model) getAutocompleteOptions(prefix string) []string {
 		return matches
 	}
 
+	// @-mentions for sending input to a model
 	if prefix[0] == '@' {
 		var matches []string
 		models := m.selectedModels()
