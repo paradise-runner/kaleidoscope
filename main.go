@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -124,30 +125,62 @@ func saveDefaults(provider string, selected map[string]map[string]bool) error {
 	return os.WriteFile(configPath, data, 0644)
 }
 
-// History helpers - per-repo history stored in JSON array at .kaleidoscope_history.json
-func historyFilePath() string {
+// History helpers - persist per-repo history in tmp directory with migration
+func repoHistoryFilePath() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return ".kaleidoscope_history.json"
+		return "", err
 	}
-	return filepath.Join(cwd, ".kaleidoscope_history.json")
+	abs, err := filepath.Abs(cwd)
+	if err != nil {
+		abs = cwd
+	}
+	hash := sha1.Sum([]byte(abs))
+	dir := filepath.Join(os.TempDir(), "kaleidoscope-history")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	file := filepath.Join(dir, fmt.Sprintf("%x.json", hash))
+	return file, nil
 }
 
 func loadHistoryForRepo() []string {
-	path := historyFilePath()
-	data, err := os.ReadFile(path)
+	path, err := repoHistoryFilePath()
+	if err == nil {
+		if data, err := os.ReadFile(path); err == nil {
+			var h []string
+			if jsonErr := json.Unmarshal(data, &h); jsonErr == nil {
+				return h
+			}
+		}
+	}
+
+	// Migrate from old per-repo file if present
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	oldPath := filepath.Join(cwd, ".kaleidoscope_history.json")
+	data, err := os.ReadFile(oldPath)
 	if err != nil {
 		return nil
 	}
 	var h []string
-	if err := json.Unmarshal(data, &h); err != nil {
+	if jsonErr := json.Unmarshal(data, &h); jsonErr != nil {
 		return nil
+	}
+	if newPath, e := repoHistoryFilePath(); e == nil {
+		_ = os.WriteFile(newPath, data, 0644)
+		_ = os.Remove(oldPath)
 	}
 	return h
 }
 
 func saveHistoryForRepo(h []string) error {
-	path := historyFilePath()
+	path, err := repoHistoryFilePath()
+	if err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(h, "", "  ")
 	if err != nil {
 		return err
