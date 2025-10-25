@@ -82,7 +82,7 @@ func incrementChoice(provider string, model string) error {
 	return os.WriteFile(configPath, data, 0644)
 }
 
-func saveDefaults(provider string, selected map[string]map[string]bool) error {
+func saveDefaults(provider string, selected map[string]map[string]int) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -101,9 +101,11 @@ func saveDefaults(provider string, selected map[string]map[string]bool) error {
 	models := make(map[string][]string)
 	for prov, sel := range selected {
 		var selectedModels []string
-		for model, isSelected := range sel {
-			if isSelected {
-				selectedModels = append(selectedModels, model)
+		for model, count := range sel {
+			if count > 0 {
+				for i := 0; i < count; i++ {
+					selectedModels = append(selectedModels, model)
+				}
 			}
 		}
 		if len(selectedModels) > 0 {
@@ -219,7 +221,7 @@ func (m model) identifier() string {
 	p := m.currentProvider()
 	if sel := m.selected[p]; sel != nil {
 		for _, name := range m.models[p] {
-			if sel[name] {
+			if sel[name] > 0 {
 				modelName = name
 				break
 			}
@@ -321,7 +323,7 @@ type model struct {
 
 	// Models per provider and current multi-select state
 	models      map[string][]string
-	selected    map[string]map[string]bool // provider -> model -> selected
+	selected    map[string]map[string]int // provider -> model -> count selected (>=0)
 	modelsOpen  bool
 	modelsHover int
 
@@ -352,6 +354,10 @@ type model struct {
 	modelToPaneID    map[string]string
 	modelToWorktree  map[string]string
 	modelPrompts     map[string][]string
+
+	// Instance metadata
+	instanceProvider  map[string]string // instance label -> provider at open time
+	instanceBaseModel map[string]string // instance label -> base model name
 
 	// New task screen state
 	newTaskName       string
@@ -394,7 +400,7 @@ func initialModel(runCmd string, setDefault bool) model {
 		"github-copilot": {"claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5-mini", "gpt-5", "gemini-2.0-flash-001", "claude-opus-4", "grok-code-fast-1", "claude-3.5-sonnet", "o3-mini", "gpt-5-codex", "gpt-4o", "gpt-4.1", "o4-mini", "claude-opus-41", "claude-3.7-sonnet", "gemini-2.5-pro", "o3", "claude-sonnet-4", "claude-3.7-sonnet-thought"},
 		"OpenAI":         {"gpt-5", "gpt-5-codex", "gpt-5-mini"},
 	}
-	sel := map[string]map[string]bool{
+	sel := map[string]map[string]int{
 		"github-copilot": {},
 		"OpenAI":         {},
 	}
@@ -413,9 +419,9 @@ func initialModel(runCmd string, setDefault bool) model {
 		if models, ok := defaults.Models[defaults.Provider]; ok {
 			for _, model := range models {
 				if sel[defaults.Provider] == nil {
-					sel[defaults.Provider] = make(map[string]bool)
+					sel[defaults.Provider] = make(map[string]int)
 				}
-				sel[defaults.Provider][model] = true
+				sel[defaults.Provider][model]++
 			}
 		}
 	}
@@ -656,10 +662,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Push to history and persist
 			m.history = pushHistorySlice(m.history, initialPrompt)
 			_ = saveHistoryForRepo(m.history)
-			for i, modelName := range msg.modelNames {
-				m.modelToPaneID[modelName] = msg.paneIDs[i]
-				m.modelToWorktree[modelName] = msg.worktrees[i]
-				m.modelPrompts[modelName] = []string{initialPrompt}
+			for i, instanceLabel := range msg.modelNames {
+				m.modelToPaneID[instanceLabel] = msg.paneIDs[i]
+				m.modelToWorktree[instanceLabel] = msg.worktrees[i]
+				m.modelPrompts[instanceLabel] = []string{initialPrompt}
+				if m.instanceProvider == nil {
+					m.instanceProvider = make(map[string]string)
+				}
+				if m.instanceBaseModel == nil {
+					m.instanceBaseModel = make(map[string]string)
+				}
+				if i < len(msg.providers) {
+					m.instanceProvider[instanceLabel] = msg.providers[i]
+				}
+				if i < len(msg.baseModels) {
+					m.instanceBaseModel[instanceLabel] = msg.baseModels[i]
+				}
 			}
 		}
 		return m, nil
@@ -810,7 +828,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case tea.KeySpace:
-			// Space toggles selection when in models multiselect and open.
+			// Space increments selection count when in models multiselect and open.
 			if m.focus == focusModels && m.modelsOpen {
 				opts := m.providerModels()
 				if len(opts) == 0 {
@@ -824,10 +842,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				p := m.currentProvider()
 				if m.selected[p] == nil {
-					m.selected[p] = map[string]bool{}
+					m.selected[p] = map[string]int{}
 				}
 				name := opts[m.modelsHover]
-				m.selected[p][name] = !m.selected[p][name]
+				m.selected[p][name] = m.selected[p][name] + 1
 				return m, nil
 			}
 			// Otherwise, treat space as text input in focused text fields.
@@ -887,8 +905,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.focus == focusModels {
+				// When the models dropdown is open, Backspace decrements the hovered model count.
 				if m.modelsOpen {
-					m.modelsOpen = false
+					opts := m.providerModels()
+					if len(opts) == 0 {
+						return m, nil
+					}
+					if m.modelsHover < 0 {
+						m.modelsHover = 0
+					}
+					if m.modelsHover >= len(opts) {
+						m.modelsHover = len(opts) - 1
+					}
+					p := m.currentProvider()
+					if m.selected[p] == nil {
+						m.selected[p] = map[string]int{}
+					}
+					name := opts[m.modelsHover]
+					if m.selected[p][name] > 0 {
+						m.selected[p][name] = m.selected[p][name] - 1
+					}
+					return m, nil
 				}
 				return m, nil
 			}
@@ -1554,7 +1591,9 @@ type panesOpenedMsg struct {
 	err        error
 	paneIDs    []string
 	worktrees  []string
-	modelNames []string
+	modelNames []string // instance labels used as keys
+	providers  []string // provider used to open each instance
+	baseModels []string // base model name for each instance
 }
 
 type bailCompleteMsg struct{}
@@ -1608,20 +1647,32 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 		var lastErr error
 		var paneIDs []string
 		var worktrees []string
-		var modelNames []string
-		for _, name := range models {
-			id := m.identifierFor(name)
-			// Use split-window to run the git commands in the new pane directly.
-			// Request the new pane id with -P -F "#{pane_id}" so we can target it if needed.
-			// Build command: add worktree from feature branch in parent directory, cd into it, then run opencode with provider/model and prompt
+		var modelNames []string            // instance labels used as keys
+		var providers []string             // provider used to open each instance
+		var baseModels []string            // base model for each instance
+		baseCounts := make(map[string]int) // base model -> count so far
+
+		for _, baseName := range models {
+			// Generate a unique instance label per base model: base, base-2, base-3, ...
+			baseCounts[baseName] = baseCounts[baseName] + 1
+			seq := baseCounts[baseName]
+			instanceLabel := baseName
+			if seq > 1 {
+				instanceLabel = fmt.Sprintf("%s-%d", baseName, seq)
+			}
+
+			id := m.identifierFor(instanceLabel)
+
+			// Build command for the pane: add worktree, cd, then run opencode bound to provider/base
 			shellQuote := func(s string) string {
 				return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 			}
-			provider := m.currentProvider()
+			provider := m.currentProvider() // capture provider at open time
 			prompt := strings.Join(m.input, "\n")
-			modelFull := provider + "/" + name
+			modelFull := provider + "/" + baseName
 			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s %s || true; cd ../%s; opencode run -m %s %s; %s; exec $SHELL",
 				shellQuote(id), shellQuote(id), shellQuote(branchName), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), m.runCmd)
+
 			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
 			if err != nil {
 				lastErr = err
@@ -1630,7 +1681,9 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 			newPaneID := strings.TrimSpace(out)
 			paneIDs = append(paneIDs, newPaneID)
 			worktrees = append(worktrees, id)
-			modelNames = append(modelNames, name)
+			modelNames = append(modelNames, instanceLabel)
+			providers = append(providers, provider)
+			baseModels = append(baseModels, baseName)
 			opened++
 		}
 
@@ -1643,7 +1696,7 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 		// Inform in tmux status line
 		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Opened %d pane(s)", opened)})
 
-		return panesOpenedMsg{count: opened, err: lastErr, paneIDs: paneIDs, worktrees: worktrees, modelNames: modelNames}
+		return panesOpenedMsg{count: opened, err: lastErr, paneIDs: paneIDs, worktrees: worktrees, modelNames: modelNames, providers: providers, baseModels: baseModels}
 	}
 }
 
@@ -1691,7 +1744,14 @@ func nextCmd(m model, modelName string) tea.Cmd {
 			return bailCompleteMsg{}
 		}
 
-		if err := incrementChoice(m.currentProvider(), modelName); err != nil {
+		// Increment choice for the bound provider/base model
+		prov := m.instanceProvider[modelName]
+		base := m.instanceBaseModel[modelName]
+		if prov == "" || base == "" {
+			prov = m.currentProvider()
+			base = modelName
+		}
+		if err := incrementChoice(prov, base); err != nil {
 			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
 		}
 
@@ -1772,6 +1832,17 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 			return bailCompleteMsg{}
 		}
 
+		// Increment choice for the bound provider/base model
+		prov := m.instanceProvider[modelName]
+		base := m.instanceBaseModel[modelName]
+		if prov == "" || base == "" {
+			prov = m.currentProvider()
+			base = modelName
+		}
+		if err := incrementChoice(prov, base); err != nil {
+			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
+		}
+
 		cwd, err := os.Getwd()
 		if err != nil {
 			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
@@ -1847,8 +1918,15 @@ func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model)
 			return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 		}
 
-		provider := m.currentProvider()
-		modelFull := provider + "/" + modelName
+		// Use bound provider/base model for this instance label
+		provider := m.instanceProvider[modelName]
+		base := m.instanceBaseModel[modelName]
+		if provider == "" || base == "" {
+			// Fallback to currentProvider and given modelName
+			provider = m.currentProvider()
+			base = modelName
+		}
+		modelFull := provider + "/" + base
 		bashCmd := fmt.Sprintf("opencode run -m %s %s", shellQuote(modelFull), shellQuote(prompt))
 
 		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, "C-c"})
@@ -2118,7 +2196,15 @@ func (m model) viewIteration() string {
 		promptHeight = 10
 	}
 
-	selectedModels := m.selectedModels()
+	// Prefer opened instance labels for mention/highlight; fallback to selections
+	var mentionables []string
+	if len(m.modelToWorktree) > 0 {
+		for name := range m.modelToWorktree {
+			mentionables = append(mentionables, name)
+		}
+	} else {
+		mentionables = m.selectedModels()
+	}
 
 	var pb strings.Builder
 	for i, line := range m.iterationInput {
@@ -2128,8 +2214,8 @@ func (m model) viewIteration() string {
 				col = len(line)
 			}
 
-			leftPart := highlightCommandLine(line[:col], selectedModels)
-			rightPart := highlightCommandLine(line[col:], selectedModels)
+			leftPart := highlightCommandLine(line[:col], mentionables)
+			rightPart := highlightCommandLine(line[col:], mentionables)
 
 			pb.WriteString(leftPart)
 			if m.cursorVisible {
@@ -2138,7 +2224,7 @@ func (m model) viewIteration() string {
 			}
 			pb.WriteString(rightPart)
 		} else {
-			pb.WriteString(highlightCommandLine(line, selectedModels))
+			pb.WriteString(highlightCommandLine(line, mentionables))
 		}
 		if i < len(m.iterationInput)-1 {
 			pb.WriteString("\n")
@@ -2152,7 +2238,7 @@ func (m model) viewIteration() string {
 		Padding(1, 2)
 
 	label := lipgloss.NewStyle().Faint(true).Render("iteration prompt")
-	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /next <model> /wrap <model> | @<model> <prompt>")
+	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /next <instance> /wrap <instance> | @<instance> <prompt>")
 	promptView := label + "\n" + promptBox.Render(pb.String()) + "\n" + hint
 
 	if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
@@ -2363,13 +2449,13 @@ func (m model) renderModelsDropdown(width int) string {
 
 	opts := m.providerModels()
 	if !m.modelsOpen {
-		// collapsed: show count selected
+		// collapsed: show total count selected
 		count := 0
 		p := m.currentProvider()
 		if m.selected[p] != nil {
 			for _, v := range m.selected[p] {
-				if v {
-					count++
+				if v > 0 {
+					count += v
 				}
 			}
 		}
@@ -2380,16 +2466,19 @@ func (m model) renderModelsDropdown(width int) string {
 		return label + "\n" + box.Render(labelText)
 	}
 
-	// open: list with checkboxes
+	// open: list with counts
 	var list strings.Builder
 	p := m.currentProvider()
 	sel := m.selected[p]
 	for i, opt := range opts {
-		checked := "[ ]"
-		if sel != nil && sel[opt] {
-			checked = "[x]"
+		c := 0
+		if sel != nil {
+			c = sel[opt]
 		}
-		row := checked + " " + opt
+		row := opt
+		if c > 0 {
+			row = fmt.Sprintf("%s ×%d", opt, c)
+		}
 		if i == m.modelsHover {
 			row = lipgloss.NewStyle().Reverse(true).Render(row)
 		}
@@ -2407,8 +2496,14 @@ func (m model) renderSelectedColumn(width int) string {
 	sel := m.selected[p]
 	var lines []string
 	for _, name := range m.models[p] {
-		if sel != nil && sel[name] {
-			lines = append(lines, "• "+name)
+		if sel != nil {
+			if c := sel[name]; c > 0 {
+				if c == 1 {
+					lines = append(lines, "• "+name)
+				} else {
+					lines = append(lines, fmt.Sprintf("• %s ×%d", name, c))
+				}
+			}
 		}
 	}
 	if len(lines) == 0 {
@@ -2647,8 +2742,10 @@ func (m model) selectedModels() []string {
 		return out
 	}
 	for _, name := range m.models[p] {
-		if sel[name] {
-			out = append(out, name)
+		if c, ok := sel[name]; ok && c > 0 {
+			for i := 0; i < c; i++ {
+				out = append(out, name)
+			}
 		}
 	}
 	return out
@@ -2766,11 +2863,18 @@ func (m model) getAutocompleteOptions(prefix string) []string {
 	// @-mentions for sending input to a model
 	if prefix[0] == '@' {
 		var matches []string
-		models := m.selectedModels()
+		// Prefer opened instance labels (keys of modelToWorktree); fallback to selected models
+		var candidates []string
+		for name := range m.modelToWorktree {
+			candidates = append(candidates, name)
+		}
+		if len(candidates) == 0 {
+			candidates = m.selectedModels()
+		}
 		searchPrefix := prefix[1:]
-		for _, model := range models {
-			if strings.HasPrefix(model, searchPrefix) {
-				matches = append(matches, "@"+model)
+		for _, name := range candidates {
+			if strings.HasPrefix(name, searchPrefix) {
+				matches = append(matches, "@"+name)
 			}
 		}
 		return matches
