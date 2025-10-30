@@ -648,6 +648,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bailCompleteMsg:
 		return m, tea.Quit
 	case nextCompleteMsg:
+		// Clear iteration prompt and related state so it's empty next view
+		m.iterationInput = []string{""}
+		m.iterationCursor.row = 0
+		m.iterationCursor.col = 0
+		m.iterationHistoryIndex = -1
+		m.draftIterationInput = nil
+		m.autocompleteActive = false
+		m.autocompleteOptions = nil
 		m.screen = screenNewTask
 		m.newTaskFocus = focusTask
 		return m, nil
