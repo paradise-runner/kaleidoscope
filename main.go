@@ -509,7 +509,9 @@ func (m model) providerModels() []string {
 
 // Simple ASCII word helpers
 func isWordByte(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+	// Treat any non-whitespace byte as a word character so Option/Alt
+	// word movements and Option+Delete include punctuation like ',' and '.'.
+	return b != ' ' && b != '\t' && b != '\n'
 }
 
 func wordLeft(line string, col int) int {
