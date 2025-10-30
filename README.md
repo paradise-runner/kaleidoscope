@@ -175,3 +175,8 @@ Edward Champion
 
 - personal website: [hec.works](https://hec.works)
 - github: [paradise-runner](https://github.com/paradise-runner)
+
+## Acknowledgements
+This project stands on the shoulders of giants:
+- [OpenCode](https://opencode.ai)
+- [tmux](https://github.com/tmux/tmux)
