@@ -161,7 +161,7 @@ The `.kaleidoscope` file is a JSON file storing:
 To use Kaleidoscope to help develop itself, you can run:
 
 ```bash
-go build . && kaleidoscope --run "go run main.go --run 'echo \"hello world\"'"
+kaleidoscope --run "go build . && ./kaleidoscope --run 'echo \"hello world\"'"
 ```
 This command will run Kaleidoscope to help implement changes to its own codebase, and then build the updated binary. The inner `go run main.go --run 'echo "hello world"'` command just spins up a simple test command to verify functionality for you to see in the panes.
 
