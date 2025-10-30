@@ -194,6 +194,72 @@
             display: block;
         }
 
+        .install-section {
+            margin: 4rem 0;
+            background: #3a3849;
+            padding: 3rem;
+            border-radius: 8px;
+            border-left: 4px solid #7ed5c8;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .install-section h2 {
+            color: #7ed5c8;
+            margin-bottom: 1.5rem;
+            font-size: 1.8rem;
+        }
+
+        .prerequisites {
+            margin-bottom: 2rem;
+        }
+
+        .prerequisites h3 {
+            color: #a6d96a;
+            margin-bottom: 1rem;
+            font-size: 1.1rem;
+        }
+
+        .prerequisites ul {
+            list-style: none;
+            margin-left: 1rem;
+        }
+
+        .prerequisites li {
+            color: #b0b0b0;
+            margin-bottom: 0.5rem;
+            padding-left: 1.5rem;
+            position: relative;
+        }
+
+        .prerequisites li:before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: #7ed5c8;
+        }
+
+        .prerequisites a {
+            color: #7ed5c8;
+            text-decoration: none;
+        }
+
+        .prerequisites a:hover {
+            text-decoration: underline;
+        }
+
+        .install-command {
+            background: #2e2c3e;
+            padding: 1rem;
+            border-radius: 4px;
+            border: 1px solid #4a4858;
+            font-family: 'Courier New', monospace;
+            color: #7ed5c8;
+            word-break: break-all;
+            margin-top: 1rem;
+        }
+
         footer {
             text-align: center;
             padding: 3rem 0;
@@ -270,6 +336,26 @@
                 <div class="demo-content">
                     <img src="./assets/kaleidoscope-demo.gif" alt="Kaleidoscope Demo Animation">
                 </div>
+            </div>
+        </div>
+
+        <div class="install-section">
+            <h2>Get Started</h2>
+            <div class="prerequisites">
+                <h3>Prerequisites</h3>
+                <ul>
+                    <li><strong>macOS only</strong> - Currently supported on macOS</li>
+                    <li><strong>tmux</strong> - Must be running inside a tmux session
+                        <div class="install-command">brew install tmux</div>
+                    </li>
+                    <li><strong>opencode</strong> - The opencode CLI tool must be installed and configured
+                        <div class="install-command">brew install sst/tap/opencode</div>
+                    </li>
+                </ul>
+            </div>
+            <div>
+                <h3 style="color: #a6d96a; margin-bottom: 1rem; font-size: 1.1rem;">Installation</h3>
+                <div class="install-command">brew install paradise-runner/tap/kaleidoscope</div>
             </div>
         </div>
 
