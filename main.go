@@ -2897,6 +2897,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if !tmux.IsInsideTmux() {
+		fmt.Fprintln(os.Stderr, "Error: not inside a tmux session; please start tmux and re-run")
+		os.Exit(1)
+	}
+
 	p := tea.NewProgram(initialModel(*run, *setDefault), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
