@@ -1981,6 +1981,17 @@ func cleanupCmd(m model) tea.Cmd {
 	}
 }
 
+func compactHeader(width int) string {
+	// Small, single-line header used for narrow/small terminals
+	if width <= 0 {
+		width = 80
+	}
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6BCB77")).Render("KALEIDOSCOPE")
+	subtitle := lipgloss.NewStyle().Faint(true).Render(" • opencode")
+	line := title + subtitle
+	return lipgloss.PlaceHorizontal(width, lipgloss.Center, line)
+}
+
 func (m model) View() string {
 	if m.screen == screenIteration {
 		return m.viewIteration()
@@ -1991,39 +2002,68 @@ func (m model) View() string {
 	if m.screen == screenProgress {
 		return m.viewProgress()
 	}
-	// Header and spacing
-	header := rainbowHeader(m.width)
+
+	// Choose compact header for small screens to avoid huge ASCII art
+	smallScreen := (m.width > 0 && m.width < 90) || (m.height > 0 && m.height < 20)
+	var header string
+	if smallScreen {
+		header = compactHeader(m.width)
+	} else {
+		header = rainbowHeader(m.width)
+	}
 	spacer := "\n\n"
 
-	// Dimensions
+	// Dimensions (be conservative when terminal reports 0)
 	maxWidth := m.width
 	if maxWidth <= 0 {
 		maxWidth = 80
 	}
-
-	// Prompt box size
-	promptWidth := maxWidth / 2
-	if promptWidth < 50 {
-		promptWidth = 50
+	maxHeight := m.height
+	if maxHeight <= 0 {
+		maxHeight = 24
 	}
+
+	// Adaptive sizing
+	var promptWidth, branchWidth, selectedWidth int
+	if smallScreen {
+		// Stack elements vertically and use almost full width
+		promptWidth = maxWidth - 4
+		if promptWidth < 20 {
+			promptWidth = maxWidth
+		}
+		branchWidth = promptWidth
+		selectedWidth = promptWidth
+	} else {
+		// Wider layout: split into columns but allow smaller minimums
+		promptWidth = int(float64(maxWidth) * 0.5)
+		if promptWidth < 40 {
+			promptWidth = 40
+		}
+		branchWidth = int(float64(maxWidth) * 0.25)
+		if branchWidth < 20 {
+			branchWidth = 20
+		}
+		if branchWidth > 40 {
+			branchWidth = 40
+		}
+		selectedWidth = int(float64(maxWidth) * 0.18)
+		if selectedWidth < 16 {
+			selectedWidth = 16
+		}
+		if selectedWidth > 36 {
+			selectedWidth = 36
+		}
+	}
+
+	// Prompt height should adapt to available space
 	promptHeight := 10
-
-	// Branch box size (single line)
-	branchWidth := m.width / 4
-	if branchWidth < 24 {
-		branchWidth = 24
-	}
-	if branchWidth > 40 {
-		branchWidth = 40
-	}
-
-	// Selected column size
-	selectedWidth := m.width / 5
-	if selectedWidth < 24 {
-		selectedWidth = 24
-	}
-	if selectedWidth > 32 {
-		selectedWidth = 32
+	if smallScreen {
+		// leave minimal vertical space for prompt when height is small
+		promptHeight = max(3, maxHeight/4)
+	} else {
+		if maxHeight < 30 {
+			promptHeight = max(6, maxHeight/3)
+		}
 	}
 
 	// Render branch single-line with cursor
@@ -2065,13 +2105,13 @@ func (m model) View() string {
 		Width(branchWidth).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(branchBorder).
-		Padding(0, 2)
+		Padding(0, 1)
 	// task box shares width with branch box
 	taskBox := lipgloss.NewStyle().
 		Width(branchWidth).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(taskBorder).
-		Padding(0, 2)
+		Padding(0, 1)
 
 	branchLabel := lipgloss.NewStyle().Faint(true).Render("branch-name")
 	taskLabel := lipgloss.NewStyle().Faint(true).Render("task-name")
@@ -2107,13 +2147,31 @@ func (m model) View() string {
 		Width(promptWidth).Height(promptHeight).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(promptBorder).
-		Padding(1, 2)
+		Padding(1, 1)
 
 	promptView := promptBox.Render(pb.String())
 
 	// Selected models column next to the prompt
 	selectedCol := m.renderSelectedColumn(selectedWidth)
 
+	if smallScreen {
+		// Stack vertically: header, branch, prompt, selected, provider/models
+		provView := ""
+		// provider+models row simplified for small screens
+		if !m.providerOpen {
+			current := m.providers[m.providerIndex]
+			provLabel := lipgloss.NewStyle().Faint(true).Render("provider")
+			provBox := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#6BCB77")).Padding(0, 1)
+			provView = provLabel + "\n" + provBox.Render(current+"  ▾")
+		} else {
+			provView = m.renderModelsDropdown(promptWidth)
+		}
+
+		parts := []string{header, spacer, branchView, "\n", promptView, "\n", selectedCol, "\n", provView, "\n", m.renderPathBar()}
+		return strings.Join(parts, "\n")
+	}
+
+	// Wider layout: place branch | prompt | selected horizontally
 	topGap := "  "
 	row := lipgloss.JoinHorizontal(lipgloss.Top, branchView, topGap, promptView, topGap, selectedCol)
 	centeredRow := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, row)
@@ -2121,13 +2179,13 @@ func (m model) View() string {
 	// Provider + Models dropdown row (same visual width as prompt)
 	// Compute widths
 	provWidth := promptWidth / 2
-	if provWidth < 24 {
-		provWidth = 24
+	if provWidth < 20 {
+		provWidth = 20
 	}
 	gap := "  "
 	modelsWidth := promptWidth - provWidth - lipgloss.Width(gap)
-	if modelsWidth < 24 {
-		modelsWidth = 24
+	if modelsWidth < 16 {
+		modelsWidth = 16
 	}
 
 	// Provider view
@@ -2142,7 +2200,7 @@ func (m model) View() string {
 			Width(provWidth).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(provBorder).
-			Padding(0, 2)
+			Padding(0, 1)
 		provView := provLabel + "\n" + provBox.Render(current+"  ▾")
 
 		// Models collapsed or open
@@ -2173,7 +2231,7 @@ func (m model) View() string {
 		Width(provWidth).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(provBorder).
-		Padding(0, 2)
+		Padding(0, 1)
 	provOpenView := provLabel + "\n" + provOpenBox.Render(list.String())
 
 	modelsView := m.renderModelsDropdown(modelsWidth)
@@ -2184,6 +2242,13 @@ func (m model) View() string {
 	hintCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, hint)
 
 	return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered + "\n\n" + m.renderPathBar()
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (m model) viewIteration() string {
