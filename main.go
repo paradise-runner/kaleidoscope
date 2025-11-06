@@ -648,6 +648,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bailCompleteMsg:
 		return m, tea.Quit
 	case nextCompleteMsg:
+		// Remove the pane/worktree from tracked state and transition to NewTask.
+		// Clearing iteration input so user can enter the next task.
+		if msg.PaneID != "" {
+			// remove pane id from createdPanes
+			var remaining []string
+			for _, p := range m.createdPanes {
+				if p != msg.PaneID {
+					remaining = append(remaining, p)
+				}
+			}
+			m.createdPanes = remaining
+		}
+		if msg.Worktree != "" {
+			var remainingWT []string
+			for _, w := range m.createdWorktrees {
+				if w != msg.Worktree {
+					remainingWT = append(remainingWT, w)
+				}
+			}
+			m.createdWorktrees = remainingWT
+		}
+		if msg.Model != "" {
+			delete(m.modelToPaneID, msg.Model)
+			delete(m.modelToWorktree, msg.Model)
+			delete(m.modelPrompts, msg.Model)
+			delete(m.instanceProvider, msg.Model)
+			delete(m.instanceBaseModel, msg.Model)
+		}
 		// Clear iteration prompt and related state so it's empty next view
 		m.iterationInput = []string{""}
 		m.iterationCursor.row = 0
@@ -658,13 +686,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autocompleteOptions = nil
 		m.screen = screenNewTask
 		m.newTaskFocus = focusTask
+		// Surface any error message
+		if msg.ErrorText != "" {
+			_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: %s", msg.ErrorText)})
+		}
 		return m, nil
 	case wrapCompleteMsg:
+		// Similar cleanup/state update as nextCompleteMsg, but after wrapping
+		// we should quit the TUI instead of returning to the new-task screen.
+		if msg.PaneID != "" {
+			var remaining []string
+			for _, p := range m.createdPanes {
+				if p != msg.PaneID {
+					remaining = append(remaining, p)
+				}
+			}
+			m.createdPanes = remaining
+		}
+		if msg.Worktree != "" {
+			var remainingWT []string
+			for _, w := range m.createdWorktrees {
+				if w != msg.Worktree {
+					remainingWT = append(remainingWT, w)
+				}
+			}
+			m.createdWorktrees = remainingWT
+		}
+		if msg.Model != "" {
+			delete(m.modelToPaneID, msg.Model)
+			delete(m.modelToWorktree, msg.Model)
+			delete(m.modelPrompts, msg.Model)
+			delete(m.instanceProvider, msg.Model)
+			delete(m.instanceBaseModel, msg.Model)
+		}
+		// Reset iteration state (not strictly necessary before quitting, but keeps
+		// state consistent for any callers that inspect the model).
+		m.iterationInput = []string{""}
+		m.iterationCursor.row = 0
+		m.iterationCursor.col = 0
+		m.iterationHistoryIndex = -1
+		m.draftIterationInput = nil
+		m.autocompleteActive = false
+		m.autocompleteOptions = nil
+		if msg.ErrorText != "" {
+			_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: %s", msg.ErrorText)})
+		}
+		// Quit the TUI after wrap completes.
 		return m, tea.Quit
 	case cleanupCompleteMsg:
 		return m, tea.Quit
 	case panesOpenedMsg:
-		if msg.err == nil && msg.count > 0 {
+		// If any panes were successfully opened, proceed to the iteration screen
+		// and record their metadata. If an error was returned but some panes
+		// did open, still continue but surface a warning to the user.
+		if msg.count > 0 {
 			m.screen = screenIteration
 			m.createdPanes = append(m.createdPanes, msg.paneIDs...)
 			m.createdWorktrees = append(m.createdWorktrees, msg.worktrees...)
@@ -689,6 +764,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.instanceBaseModel[instanceLabel] = msg.baseModels[i]
 				}
 			}
+			if msg.err != nil {
+				_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: some panes failed to open: %s", msg.err)})
+			}
+		} else if msg.err != nil {
+			// Nothing opened and we have an error
+			_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Failed to open panes: %s", msg.err)})
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -1614,9 +1695,19 @@ type panesOpenedMsg struct {
 
 type bailCompleteMsg struct{}
 
-type nextCompleteMsg struct{}
+type nextCompleteMsg struct {
+	Model     string
+	PaneID    string
+	Worktree  string
+	ErrorText string
+}
 
-type wrapCompleteMsg struct{}
+type wrapCompleteMsg struct {
+	Model     string
+	PaneID    string
+	Worktree  string
+	ErrorText string
+}
 
 type cleanupCompleteMsg struct{}
 
@@ -1861,22 +1952,27 @@ func nextCmd(m model, modelName string) tea.Cmd {
 			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
 		}
 
-		for _, paneID := range m.createdPanes {
-			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		// Kill only the pane associated with this model (if known)
+		paneID := m.modelToPaneID[modelName]
+		if paneID != "" {
+			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", paneID})
 		}
 
-		for _, wt := range m.createdWorktrees {
-			wtPath := filepath.Join(parentDir, wt)
-			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
-			cmd.Run()
+		// Remove only this worktree/branch
+		wtPath := filepath.Join(parentDir, worktree)
+		cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
+		cmd.Run()
 
-			cmd = exec.Command("git", "branch", "-D", wt)
-			cmd.Run()
+		cmd = exec.Command("git", "branch", "-D", worktree)
+		cmd.Run()
+
+		msgText := fmt.Sprintf("Next complete: merged %s and cleaned up", modelName)
+		if paneID == "" {
+			msgText = fmt.Sprintf("Next complete: merged %s (pane not found)", modelName)
 		}
+		_, _, _ = tmux.RunCmd([]string{"display-message", msgText})
 
-		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Next complete: merged %s and cleaned up", modelName)})
-
-		return nextCompleteMsg{}
+		return nextCompleteMsg{Model: modelName, PaneID: paneID, Worktree: worktree}
 	}
 }
 
@@ -1949,22 +2045,28 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
 		}
 
-		for _, paneID := range m.createdPanes {
-			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		// Kill only the pane associated with this model (if known)
+		paneID := m.modelToPaneID[modelName]
+		if paneID != "" {
+			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", paneID})
 		}
 
-		for _, wt := range m.createdWorktrees {
-			wtPath := filepath.Join(parentDir, wt)
-			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
-			cmd.Run()
+		// Remove only this worktree/branch
+		wtPath := filepath.Join(parentDir, worktree)
+		cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
+		cmd.Run()
 
-			cmd = exec.Command("git", "branch", "-D", wt)
-			cmd.Run()
+		cmd = exec.Command("git", "branch", "-D", worktree)
+		cmd.Run()
+
+		msgText := fmt.Sprintf("Wrap complete: merged %s and cleaned up", modelName)
+		if paneID == "" {
+			msgText = fmt.Sprintf("Wrap complete: merged %s (pane not found)", modelName)
 		}
+		_, _, _ = tmux.RunCmd([]string{"display-message", msgText})
 
-		tmux.RunCmd([]string{"display-message", fmt.Sprintf("Wrap complete: merged %s and cleaned up", modelName)})
+		return wrapCompleteMsg{Model: modelName, PaneID: paneID, Worktree: worktree}
 
-		return wrapCompleteMsg{}
 	}
 }
 
