@@ -2379,8 +2379,9 @@ func (m model) View() string {
 			provView = m.renderModelsDropdown(promptWidth)
 		}
 
-		parts := []string{header, spacer, branchView, "\n", promptView, "\n", selectedCol, "\n", provView, "\n", m.renderPathBar()}
-		return strings.Join(parts, "\n")
+		parts := []string{header, spacer, branchView, "\n", promptView, "\n", selectedCol, "\n", provView}
+		body := strings.Join(parts, "\n")
+		return m.renderWithBottomBar(body)
 	}
 
 	// Wider layout: place branch | prompt | selected horizontally
@@ -2424,7 +2425,8 @@ func (m model) View() string {
 		hint := lipgloss.NewStyle().Faint(true).Render("tab: next field • ↑↓: navigate • space: select models • enter: submit")
 		hintCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, hint)
 
-		return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered + "\n\n" + m.renderPathBar()
+		body := header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered
+		return m.renderWithBottomBar(body)
 	}
 
 	// Provider open view
@@ -2453,7 +2455,8 @@ func (m model) View() string {
 	hint := lipgloss.NewStyle().Faint(true).Render("tab: next field • ↑↓: navigate • space: select models • enter: submit")
 	hintCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, hint)
 
-	return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered + "\n\n" + m.renderPathBar()
+	body := header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered
+	return m.renderWithBottomBar(body)
 }
 
 func max(a, b int) int {
@@ -2572,7 +2575,8 @@ func (m model) viewIteration() string {
 	centeredPrompt := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, promptView)
 	centeredVertical := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, centeredPrompt)
 
-	return header + "\n\n" + centeredVertical + "\n\n" + m.renderPathBar()
+	body := header + "\n\n" + centeredVertical
+	return m.renderWithBottomBar(body)
 }
 
 func (m model) viewNewTask() string {
@@ -2679,7 +2683,8 @@ func (m model) viewNewTask() string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top, taskView, topGap, promptView)
 	centeredRow := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, row)
 
-	return header + "\n\n" + centeredRow + "\n\n" + m.renderPathBar()
+	body := header + "\n\n" + centeredRow
+	return m.renderWithBottomBar(body)
 }
 
 func (m model) viewProgress() string {
@@ -2700,7 +2705,8 @@ func (m model) viewProgress() string {
 	line := fmt.Sprintf(" %s  %s", spinner, msg)
 	centered := lipgloss.PlaceHorizontal(maxWidth, lipgloss.Center, line)
 	centeredVertical := lipgloss.Place(maxWidth, m.height, lipgloss.Center, lipgloss.Center, centered)
-	return header + "\n\n" + centeredVertical + "\n\n" + m.renderPathBar()
+	body := header + "\n\n" + centeredVertical
+	return m.renderWithBottomBar(body)
 }
 
 func highlightCommandLine(line string, selectedModels []string) string {
@@ -2968,7 +2974,34 @@ func (m model) renderPathBar() string {
 	content := label + " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6BCB77")).Render("> "+path)
 	// Let the bar size to the content instead of forcing full terminal width
 	bar := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#D896FF")).Padding(0, 2).Render(content)
-	return lipgloss.PlaceHorizontal(m.width, lipgloss.Left, bar)
+	// Return the styled bar itself (no placement), caller will anchor it to the bottom
+	return bar
+}
+
+// renderWithBottomBar pads `body` so that the path bar appears on the last
+// terminal line (anchored to the bottom-left). If the terminal height is
+// unknown or too small, fall back to appending the bar with a small gap.
+func (m model) renderWithBottomBar(body string) string {
+	bar := m.renderPathBar()
+	if m.height <= 0 {
+		// Unknown height: preserve previous spacing
+		return body + "\n\n" + bar
+	}
+	// Count lines in body and bar
+	bodyLines := 0
+	if body != "" {
+		bodyLines = strings.Count(body, "\n") + 1
+	}
+	barLines := 0
+	if bar != "" {
+		barLines = strings.Count(bar, "\n") + 1
+	}
+	pad := m.height - bodyLines - barLines
+	if pad <= 0 {
+		// Not enough room: keep one blank line between content and bar
+		return body + "\n\n" + bar
+	}
+	return body + strings.Repeat("\n", pad) + bar
 }
 
 func rainbowHeader(width int) string {
