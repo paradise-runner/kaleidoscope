@@ -19,6 +19,7 @@ import (
 )
 
 const escDelay = 150 * time.Millisecond
+const exitDoublePressWindow = 500 * time.Millisecond
 const historyMax = 20
 
 type kaleidoscopeDefaults struct {
@@ -382,6 +383,10 @@ type model struct {
 
 	// Pending ESC to detect Alt sequences
 	pendingEsc bool
+
+	// exitPending indicates one press of ESC or Ctrl+C has occurred; a second
+	// press within exitDoublePressWindow will exit the TUI. Cleared by a timer.
+	exitPending bool
 
 	// Message history (per-repo). `history` holds most-recent-first order.
 	history []string
@@ -778,7 +783,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case escTimeoutMsg:
 		if m.pendingEsc {
 			m.pendingEsc = false
-			return m, cleanupCmd(m)
+			// ESC was pressed alone (no following key). If an exit is already
+			// pending, treat this as the confirm press; otherwise start the
+			// double-press exit window so the UI can show a warning.
+			if m.exitPending {
+				return m, cleanupCmd(m)
+			}
+			m.exitPending = true
+			return m, tea.Tick(exitDoublePressWindow, func(t time.Time) tea.Msg { return exitTimeoutMsg{} })
+		}
+		return m, nil
+	case exitTimeoutMsg:
+		// Exit confirmation window expired; clear pending flag so the warning
+		// disappears and normal input resumes.
+		if m.exitPending {
+			m.exitPending = false
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -823,7 +842,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.Type {
 		case tea.KeyCtrlC:
-			return m, cleanupCmd(m)
+			if m.exitPending {
+				return m, cleanupCmd(m)
+			}
+			m.exitPending = true
+			return m, tea.Tick(exitDoublePressWindow, func(t time.Time) tea.Msg { return exitTimeoutMsg{} })
 		case tea.KeyEsc:
 			// Start ESC timer to detect meta sequences
 			m.pendingEsc = true
@@ -1204,7 +1227,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		return m, cleanupCmd(m)
+		if m.exitPending {
+			return m, cleanupCmd(m)
+		}
+		m.exitPending = true
+		return m, tea.Tick(exitDoublePressWindow, func(t time.Time) tea.Msg { return exitTimeoutMsg{} })
 	case tea.KeyEsc:
 		m.pendingEsc = true
 		return m, tea.Tick(escDelay, func(t time.Time) tea.Msg { return escTimeoutMsg{} })
@@ -1495,7 +1522,11 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
-		return m, cleanupCmd(m)
+		if m.exitPending {
+			return m, cleanupCmd(m)
+		}
+		m.exitPending = true
+		return m, tea.Tick(exitDoublePressWindow, func(t time.Time) tea.Msg { return exitTimeoutMsg{} })
 	case tea.KeyEsc:
 		m.pendingEsc = true
 		return m, tea.Tick(escDelay, func(t time.Time) tea.Msg { return escTimeoutMsg{} })
@@ -1682,6 +1713,8 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 type escTimeoutMsg struct{}
+
+type exitTimeoutMsg struct{}
 
 type panesOpenedMsg struct {
 	count      int
@@ -2983,11 +3016,23 @@ func (m model) renderPathBar() string {
 // unknown or too small, fall back to appending the bar with a small gap.
 func (m model) renderWithBottomBar(body string) string {
 	bar := m.renderPathBar()
+	// If exit warning is active, render a red warning line above the bar and
+	// account for its height when padding.
+	warning := ""
+	warningLines := 0
+	if m.exitPending {
+		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B6B")).Bold(true)
+		warning = warnStyle.Render("Press Esc or Ctrl+C again to exit")
+		warningLines = 1
+	}
 	if m.height <= 0 {
 		// Unknown height: preserve previous spacing
+		if warning != "" {
+			return body + "\n\n" + warning + "\n" + bar
+		}
 		return body + "\n\n" + bar
 	}
-	// Count lines in body and bar
+	// Count lines in body, warning, and bar
 	bodyLines := 0
 	if body != "" {
 		bodyLines = strings.Count(body, "\n") + 1
@@ -2996,12 +3041,20 @@ func (m model) renderWithBottomBar(body string) string {
 	if bar != "" {
 		barLines = strings.Count(bar, "\n") + 1
 	}
-	pad := m.height - bodyLines - barLines
+	pad := m.height - bodyLines - barLines - warningLines
 	if pad <= 0 {
-		// Not enough room: keep one blank line between content and bar
+		// Not enough room: keep one blank line between content, optional warning, and bar
+		if warning != "" {
+			return body + "\n\n" + warning + "\n" + bar
+		}
 		return body + "\n\n" + bar
 	}
-	return body + strings.Repeat("\n", pad) + bar
+	out := body + strings.Repeat("\n", pad)
+	if warning != "" {
+		out += warning + "\n"
+	}
+	out += bar
+	return out
 }
 
 func rainbowHeader(width int) string {
