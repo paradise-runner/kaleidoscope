@@ -2232,8 +2232,14 @@ func (m model) View() string {
 	bRight := bline[m.branchCursor:]
 	branchInner := bLeft + bRight
 	if m.focus == focusBranch && m.cursorVisible {
-		cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
-		branchInner = bLeft + cursor + bRight
+		if len(bRight) > 0 {
+			// Replace the character under the cursor with a reversed-style version
+			cursor := lipgloss.NewStyle().Reverse(true).Render(string(bRight[0]))
+			branchInner = bLeft + cursor + bRight[1:]
+		} else {
+			cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
+			branchInner = bLeft + cursor + bRight
+		}
 	}
 
 	// Render task single-line with cursor
@@ -2245,8 +2251,13 @@ func (m model) View() string {
 	tRight := tline[m.taskCursor:]
 	taskInner := tLeft + tRight
 	if m.focus == focusTask && m.cursorVisible {
-		cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
-		taskInner = tLeft + cursor + tRight
+		if len(tRight) > 0 {
+			cursor := lipgloss.NewStyle().Reverse(true).Render(string(tRight[0]))
+			taskInner = tLeft + cursor + tRight[1:]
+		} else {
+			cursor := lipgloss.NewStyle().Reverse(true).Render(" ")
+			taskInner = tLeft + cursor + tRight
+		}
 	}
 
 	branchBorder := lipgloss.Color("#6BCB77")
@@ -2284,6 +2295,30 @@ func (m model) View() string {
 			}
 			pb.WriteString(line[:col])
 			if m.focus == focusPrompt && m.cursorVisible {
+				if col < len(line) {
+					// Replace rune under cursor to avoid shifting
+					runes := []rune(line)
+					// compute rune index corresponding to byte col
+					byteIndex := 0
+					runeIndex := 0
+					for i := range runes {
+						if byteIndex >= col {
+							break
+						}
+						byteIndex += len(string(runes[i]))
+						runeIndex++
+					}
+					if runeIndex < len(runes) {
+						curBlock := lipgloss.NewStyle().Reverse(true).Render(string(runes[runeIndex]))
+						// write remainder starting after that rune
+						remaining := string(runes[runeIndex+1:])
+						pb.WriteString(curBlock)
+						pb.WriteString(remaining)
+						// we've already written the remainder, so skip the normal append below
+						continue
+					}
+				}
+				// End-of-line: show reversed space
 				curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
 				pb.WriteString(curBlock)
 			}
@@ -2446,15 +2481,33 @@ func (m model) viewIteration() string {
 				col = len(line)
 			}
 
-			leftPart := highlightCommandLine(line[:col], mentionables)
-			rightPart := highlightCommandLine(line[col:], mentionables)
-
-			pb.WriteString(leftPart)
+			// If cursor is visible, prefer replacing the character under it.
 			if m.cursorVisible {
-				curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
-				pb.WriteString(curBlock)
+				// compute rune index corresponding to byte col
+				runes := []rune(line)
+				byteIndex := 0
+				runeIndex := 0
+				for i := range runes {
+					if byteIndex >= col {
+						break
+					}
+					byteIndex += len(string(runes[i]))
+					runeIndex++
+				}
+				// If cursor is inside the line, render highlighted with cursor at runeIndex
+				if runeIndex < len(runes) {
+					pb.WriteString(highlightCommandLineWithCursor(line, mentionables, runeIndex))
+					continue
+				}
+				// End-of-line: render highlighted left, reversed space, then highlighted right
+				pb.WriteString(highlightCommandLine(line[:col], mentionables))
+				pb.WriteString(lipgloss.NewStyle().Reverse(true).Render(" "))
+				pb.WriteString(highlightCommandLine(line[col:], mentionables))
+				continue
 			}
-			pb.WriteString(rightPart)
+
+			pb.WriteString(highlightCommandLine(line, mentionables))
+
 		} else {
 			pb.WriteString(highlightCommandLine(line, mentionables))
 		}
@@ -2558,10 +2611,30 @@ func (m model) viewNewTask() string {
 			}
 			pb.WriteString(line[:col])
 			if m.newTaskFocus == focusPrompt && m.cursorVisible {
+				if col < len(line) {
+					// Replace rune under cursor
+					runes := []rune(line)
+					byteIndex := 0
+					runeIndex := 0
+					for i := range runes {
+						if byteIndex >= col {
+							break
+						}
+						byteIndex += len(string(runes[i]))
+						runeIndex++
+					}
+					if runeIndex < len(runes) {
+						curBlock := lipgloss.NewStyle().Reverse(true).Render(string(runes[runeIndex]))
+						pb.WriteString(curBlock)
+						pb.WriteString(string(runes[runeIndex+1:]))
+						continue
+					}
+				}
 				curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
 				pb.WriteString(curBlock)
 			}
 			pb.WriteString(line[col:])
+
 		} else {
 			pb.WriteString(line)
 		}
@@ -2662,6 +2735,86 @@ func highlightCommandLine(line string, selectedModels []string) string {
 			}
 		} else {
 			result.WriteRune(runes[i])
+			i++
+		}
+	}
+
+	return result.String()
+}
+
+// highlightCommandLineWithCursor renders a command line with the same
+// highlighting rules as highlightCommandLine but applies a reverse
+// style to the rune at cursorRuneIndex (if it is within the line).
+// If cursorRuneIndex is out of range (<0 or >= len(runes)) the line is
+// returned highlighted without a reversed cursor. This keeps cursor
+// rendering in a single pass and ensures slash/mention tokens are
+// styled and reversed together.
+func highlightCommandLineWithCursor(line string, selectedModels []string, cursorRuneIndex int) string {
+	// If no content, nothing to highlight; caller should handle EOL cursor.
+	if line == "" {
+		return ""
+	}
+
+	var result strings.Builder
+	runes := []rune(line)
+
+	slashStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F7B801")).Bold(true)
+	atStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6BCB77")).Bold(true)
+
+	validSlashCommands := map[string]bool{
+		"/bail":  true,
+		"/next":  true,
+		"/wrap":  true,
+		"/retry": true,
+	}
+
+	modelSet := make(map[string]bool)
+	for _, m := range selectedModels {
+		modelSet[m] = true
+	}
+
+	for i := 0; i < len(runes); {
+		if runes[i] == '/' {
+			start := i
+			i++
+			for i < len(runes) && (runes[i] >= 'a' && runes[i] <= 'z' || runes[i] >= 'A' && runes[i] <= 'Z' || runes[i] == '-' || runes[i] == '_') {
+				i++
+			}
+			cmd := string(runes[start:i])
+			out := cmd
+			if validSlashCommands[cmd] {
+				out = slashStyle.Render(cmd)
+			}
+			if cursorRuneIndex >= start && cursorRuneIndex < i {
+				out = lipgloss.NewStyle().Reverse(true).Render(out)
+			}
+			result.WriteString(out)
+		} else if runes[i] == '@' {
+			start := i
+			i++
+			for i < len(runes) && runes[i] != ' ' && runes[i] != '\t' && runes[i] != '\n' {
+				i++
+			}
+			mention := string(runes[start:i])
+			modelName := ""
+			if len(mention) > 1 {
+				modelName = mention[1:]
+			}
+			out := mention
+			if modelSet[modelName] {
+				out = atStyle.Render(mention)
+			}
+			if cursorRuneIndex >= start && cursorRuneIndex < i {
+				out = lipgloss.NewStyle().Reverse(true).Render(out)
+			}
+			result.WriteString(out)
+		} else {
+			// Normal rune
+			if i == cursorRuneIndex {
+				result.WriteString(lipgloss.NewStyle().Reverse(true).Render(string(runes[i])))
+			} else {
+				result.WriteRune(runes[i])
+			}
 			i++
 		}
 	}
