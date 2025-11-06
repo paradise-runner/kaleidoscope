@@ -1171,6 +1171,12 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, bailCmd(m)
 			}
 
+			if currentLine == "/retry" {
+				m.screen = screenProgress
+				m.progressMsg = "Retrying command: cleaning up and re-opening panes..."
+				return m, retryCmd(m)
+			}
+
 			if strings.HasPrefix(currentLine, "/next ") {
 				modelName := strings.TrimSpace(strings.TrimPrefix(currentLine, "/next "))
 				if modelName != "" {
@@ -1739,6 +1745,45 @@ func bailCmd(m model) tea.Cmd {
 		tmux.RunCmd([]string{"display-message", "Bail complete: cleaned up panes, worktrees, and branches"})
 
 		return bailCompleteMsg{}
+	}
+}
+
+func retryCmd(m model) tea.Cmd {
+	return func() tea.Msg {
+		if !tmux.IsInsideTmux() {
+			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot retry"})
+			return nil
+		}
+
+		// Kill existing panes
+		for _, paneID := range m.createdPanes {
+			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		}
+
+		// Remove existing worktrees and branches
+		cwd, err := os.Getwd()
+		if err != nil {
+			_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Retry error: %s", err)})
+			return nil
+		}
+		parentDir := filepath.Dir(cwd)
+		for _, wt := range m.createdWorktrees {
+			worktreePath := filepath.Join(parentDir, wt)
+			cmd := exec.Command("git", "worktree", "remove", worktreePath, "--force")
+			cmd.Run()
+			cmd = exec.Command("git", "branch", "-D", wt)
+			cmd.Run()
+		}
+
+		// Re-open panes for the currently selected models
+		models := m.selectedModels()
+		if len(models) == 0 {
+			_, _, _ = tmux.RunCmd([]string{"display-message", "Retry: no models selected to open"})
+			return nil
+		}
+
+		// Call openPanesCmd to create panes and return its message
+		return openPanesCmd(models, m)()
 	}
 }
 
@@ -2313,7 +2358,7 @@ func (m model) viewIteration() string {
 		Padding(1, 2)
 
 	label := lipgloss.NewStyle().Faint(true).Render("iteration prompt")
-	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /next <instance> /wrap <instance> | @<instance> <prompt>")
+	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /retry /next <instance> /wrap <instance> | @<instance> <prompt>")
 	tmuxHint := lipgloss.NewStyle().Faint(true).Render("tmux: Ctrl-b then arrow keys to move between panes")
 	promptView := label + "\n" + promptBox.Render(pb.String()) + "\n" + hint + "\n" + tmuxHint
 
@@ -2466,9 +2511,10 @@ func highlightCommandLine(line string, selectedModels []string) string {
 	atStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6BCB77")).Bold(true)
 
 	validSlashCommands := map[string]bool{
-		"/bail": true,
-		"/next": true,
-		"/wrap": true,
+		"/bail":  true,
+		"/next":  true,
+		"/wrap":  true,
+		"/retry": true,
 	}
 
 	modelSet := make(map[string]bool)
@@ -2973,7 +3019,7 @@ func (m model) getAutocompleteOptions(prefix string) []string {
 		}
 
 		// Otherwise complete top-level slash commands as before.
-		commands := []string{"/bail", "/next", "/wrap"}
+		commands := []string{"/bail", "/next", "/wrap", "/retry"}
 		var matches []string
 		for _, cmd := range commands {
 			if strings.HasPrefix(cmd, prefix) {
