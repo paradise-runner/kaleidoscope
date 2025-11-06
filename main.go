@@ -2569,9 +2569,10 @@ func (m model) renderPathBar() string {
 		}
 	}
 
-	content := label + " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6BCB77")).Render(path)
-	bar := lipgloss.NewStyle().Width(m.width).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#D896FF")).Padding(0, 2).Render(content)
-	return lipgloss.PlaceHorizontal(m.width, lipgloss.Center, bar)
+	content := label + " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6BCB77")).Render("> "+path)
+	// Let the bar size to the content instead of forcing full terminal width
+	bar := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#D896FF")).Padding(0, 2).Render(content)
+	return lipgloss.PlaceHorizontal(m.width, lipgloss.Left, bar)
 }
 
 func rainbowHeader(width int) string {
