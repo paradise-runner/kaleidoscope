@@ -2045,13 +2045,21 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
 		}
 
-		// Kill only the pane associated with this model (if known)
+		// Kill the pane associated with this model (if known)
 		paneID := m.modelToPaneID[modelName]
 		if paneID != "" {
 			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", paneID})
 		}
 
-		// Remove only this worktree/branch
+		// Also close any other panes opened by this session
+		for _, p := range m.createdPanes {
+			if p == paneID {
+				continue
+			}
+			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", p})
+		}
+
+		// Remove this worktree/branch
 		wtPath := filepath.Join(parentDir, worktree)
 		cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
 		cmd.Run()
@@ -2059,9 +2067,21 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 		cmd = exec.Command("git", "branch", "-D", worktree)
 		cmd.Run()
 
-		msgText := fmt.Sprintf("Wrap complete: merged %s and cleaned up", modelName)
+		// Remove other worktrees/branches created by this session
+		for _, other := range m.createdWorktrees {
+			if other == worktree {
+				continue
+			}
+			otherPath := filepath.Join(parentDir, other)
+			cmd = exec.Command("git", "worktree", "remove", otherPath, "--force")
+			cmd.Run()
+			cmd = exec.Command("git", "branch", "-D", other)
+			cmd.Run()
+		}
+
+		msgText := fmt.Sprintf("Wrap complete: merged %s and cleaned up %d worktree(s)", modelName, len(m.createdWorktrees))
 		if paneID == "" {
-			msgText = fmt.Sprintf("Wrap complete: merged %s (pane not found)", modelName)
+			msgText = fmt.Sprintf("Wrap complete: merged %s (pane not found) and cleaned up %d worktree(s)", modelName, len(m.createdWorktrees))
 		}
 		_, _, _ = tmux.RunCmd([]string{"display-message", msgText})
 
