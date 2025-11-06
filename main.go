@@ -3424,16 +3424,11 @@ func (m model) getAutocompleteOptions(prefix string) []string {
 }
 
 func main() {
-	run := flag.String("run", "", "run command (required)")
+	run := flag.String("run", "", "run command (optional)")
 	setDefault := flag.Bool("set-default", false, "save chosen provider and models as defaults in .kaleidoscope")
 	flag.Parse()
 
-	if *run == "" {
-		fmt.Fprintln(os.Stderr, "Error: --run flag is required")
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-
+	// --run is optional; when omitted no extra command will be appended after the opencode call.
 	if !tmux.IsInsideTmux() {
 		fmt.Fprintln(os.Stderr, "Error: not inside a tmux session; please start tmux and re-run")
 		os.Exit(1)
