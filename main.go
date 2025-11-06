@@ -1686,8 +1686,13 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 			provider := m.currentProvider() // capture provider at open time
 			prompt := strings.Join(m.input, "\n")
 			modelFull := provider + "/" + baseName
-			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s %s || true; cd ../%s; opencode run -m %s %s; %s; exec $SHELL",
-				shellQuote(id), shellQuote(id), shellQuote(branchName), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), m.runCmd)
+			// Append configured run command if provided
+			runPart := ""
+			if strings.TrimSpace(m.runCmd) != "" {
+				runPart = "; " + m.runCmd
+			}
+			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s %s || true; cd ../%s; opencode run -m %s %s%s; exec $SHELL",
+				shellQuote(id), shellQuote(id), shellQuote(branchName), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), runPart)
 
 			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
 			if err != nil {
@@ -1982,7 +1987,12 @@ func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model)
 			base = modelName
 		}
 		modelFull := provider + "/" + base
-		bashCmd := fmt.Sprintf("opencode run -m %s %s", shellQuote(modelFull), shellQuote(prompt))
+		// Append configured run command if provided, mirroring openPanesCmd behavior
+		runPart := ""
+		if strings.TrimSpace(m.runCmd) != "" {
+			runPart = "; " + m.runCmd
+		}
+		bashCmd := fmt.Sprintf("opencode run -m %s %s%s", shellQuote(modelFull), shellQuote(prompt), runPart)
 
 		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, "C-c"})
 		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, bashCmd, "Enter"})
