@@ -2154,7 +2154,7 @@ func (m model) View() string {
 		hint := lipgloss.NewStyle().Faint(true).Render("tab: next field • ↑↓: navigate • space: select models • enter: submit")
 		hintCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, hint)
 
-		return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered
+		return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered + "\n\n" + m.renderPathBar()
 	}
 
 	// Provider open view
@@ -2183,7 +2183,7 @@ func (m model) View() string {
 	hint := lipgloss.NewStyle().Faint(true).Render("tab: next field • ↑↓: navigate • space: select models • enter: submit")
 	hintCentered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, hint)
 
-	return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered
+	return header + spacer + centeredRow + "\n\n" + pairCentered + "\n\n" + hintCentered + "\n\n" + m.renderPathBar()
 }
 
 func (m model) viewIteration() string {
@@ -2277,7 +2277,7 @@ func (m model) viewIteration() string {
 	centeredPrompt := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, promptView)
 	centeredVertical := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, centeredPrompt)
 
-	return header + "\n\n" + centeredVertical
+	return header + "\n\n" + centeredVertical + "\n\n" + m.renderPathBar()
 }
 
 func (m model) viewNewTask() string {
@@ -2364,7 +2364,7 @@ func (m model) viewNewTask() string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top, taskView, topGap, promptView)
 	centeredRow := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, row)
 
-	return header + "\n\n" + centeredRow
+	return header + "\n\n" + centeredRow + "\n\n" + m.renderPathBar()
 }
 
 func (m model) viewProgress() string {
@@ -2385,7 +2385,7 @@ func (m model) viewProgress() string {
 	line := fmt.Sprintf(" %s  %s", spinner, msg)
 	centered := lipgloss.PlaceHorizontal(maxWidth, lipgloss.Center, line)
 	centeredVertical := lipgloss.Place(maxWidth, m.height, lipgloss.Center, lipgloss.Center, centered)
-	return header + "\n\n" + centeredVertical
+	return header + "\n\n" + centeredVertical + "\n\n" + m.renderPathBar()
 }
 
 func highlightCommandLine(line string, selectedModels []string) string {
@@ -2526,6 +2526,52 @@ func (m model) renderSelectedColumn(width int) string {
 		BorderForeground(lipgloss.Color("#6BCB77")).
 		Padding(0, 2)
 	return label + "\n" + box.Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderPathBar() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	if home, e := os.UserHomeDir(); e == nil && home != "" && strings.HasPrefix(cwd, home) {
+		cwd = "~" + strings.TrimPrefix(cwd, home)
+	}
+
+	// Prepare label and path content (make text blue)
+	label := lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("#6BCB77")).Render("cwd")
+	path := cwd
+
+	// Determine available inner width (subtract padding/borders)
+	available := m.width - 10
+	if available < 10 {
+		available = 10
+	}
+	if lipgloss.Width(path) > available {
+		r := []rune(path)
+		keep := available - 3
+		if keep <= 0 {
+			path = "…"
+		} else {
+			start := keep / 2
+			end := keep - start
+			if start < 0 {
+				start = 0
+			}
+			if end < 0 {
+				end = 0
+			}
+			if start+end > len(r) {
+				// Fallback simple truncation
+				path = string(r[:available])
+			} else {
+				path = string(r[:start]) + "…" + string(r[len(r)-end:])
+			}
+		}
+	}
+
+	content := label + " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#6BCB77")).Render(path)
+	bar := lipgloss.NewStyle().Width(m.width).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#D896FF")).Padding(0, 2).Render(content)
+	return lipgloss.PlaceHorizontal(m.width, lipgloss.Center, bar)
 }
 
 func rainbowHeader(width int) string {
