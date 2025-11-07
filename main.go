@@ -2502,8 +2502,6 @@ func max(a, b int) int {
 }
 
 func (m model) viewIteration() string {
-	header := rainbowHeader(m.width)
-
 	maxWidth := m.width
 	if maxWidth <= 0 {
 		maxWidth = 80
@@ -2516,10 +2514,21 @@ func (m model) viewIteration() string {
 	if promptWidth > 100 {
 		promptWidth = 100
 	}
-	promptHeight := m.height - 20
-	if promptHeight < 10 {
-		promptHeight = 10
+
+	// Calculate available height for prompt area, accounting for header, hints, and bottom bar
+	// Hints (label, commands hint, tmux hint) = 3 lines
+	// Bottom bar = 1-2 lines
+	// Leave small buffer above bottom bar for breathing room
+	reservedTop := 2         // minimal spacing at top
+	reservedBottom := 5      // hints + buffer + bottom bar
+	availableHeight := m.height - reservedTop - reservedBottom
+	if availableHeight < 8 {
+		availableHeight = 8
 	}
+	if availableHeight > 20 {
+		availableHeight = 20
+	}
+	promptHeight := availableHeight
 
 	// Prefer opened instance labels for mention/highlight; fallback to selections
 	var mentionables []string
@@ -2603,9 +2612,9 @@ func (m model) viewIteration() string {
 	}
 
 	centeredPrompt := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, promptView)
-	centeredVertical := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, centeredPrompt)
-
-	body := header + "\n\n" + centeredVertical
+	
+	// Position content with minimal spacing at top
+	body := centeredPrompt
 	return m.renderWithBottomBar(body)
 }
 
