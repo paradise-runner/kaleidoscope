@@ -425,7 +425,7 @@ func initialModel(runCmd string, setDefault bool) model {
 
 	defaults := loadDefaults()
 	if defaults != nil {
-		providers := []string{"opencode", "openai", "openrouter", "lmstudio", "anthropic", "amazon-bedrock", "github-copilot", "OpenAI"}
+		providers := []string{"github-copilot", "openai", "anthropic", "opencode", "openrouter", "lmstudio", "amazon-bedrock", "OpenAI"}
 		for i, provider := range providers {
 			if provider == defaults.Provider {
 				providerIndex = i
