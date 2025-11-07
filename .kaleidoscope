@@ -4,7 +4,7 @@
   "choices": {
     "github-copilot": {
       "claude-haiku-4.5": 2,
-      "gpt-5-mini": 4
+      "gpt-5-mini": 11
     }
   }
 }

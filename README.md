@@ -35,14 +35,16 @@ brew install paradise-runner/tap/kaleidoscope
 
 ### Basic Usage
 
-Run Kaleidoscope with the required `--run` flag specifying the command to execute after opencode completes:
-
+Kick off kaleidoscope after starting a tmux sessoion. You can use the optional `--run` flag to specify a command to execute after the AI completes:
 ```bash
 # start a new tmux session
 tmux
 
-# run kaleidoscope with your test command
+# run kaleidoscope with your test command to verify functionality for you to see in the panes
 kaleidoscope --run "npm test"
+
+# or run kaleidoscope without a command if you don't know what the run command is
+kaleidoscope
 ```
 
 Let the fireworks begin!
@@ -93,11 +95,9 @@ kaleidoscope --run "npm test" --set-default
 This creates a `.kaleidoscope` file in your current directory with your preferences. The file includes:
 - Default provider
 - Selected models per provider
-- Usage statistics for each model (tracked when using `/next`)
+- Usage statistics for each model (tracked when using `/next` or `/wrap`)
 
 ## Configuration
-
-The `.kaleidoscope` file is a JSON file storing:
 
 ```json
 {
@@ -146,7 +146,7 @@ The `.kaleidoscope` file is a JSON file storing:
 ## How It Works
 
 1. **Setup**: Creates a feature branch from your current branch
-2. **Worktrees**: For each selected model, creates a git worktree in `../<repo>-<branch>-<task>-<model>/`
+2. **Worktrees**: For each selected model, creates a git worktree in `../<repo>-<branch>-<task>-<model>/` to isolate changes
 3. **Execution**: Opens a tmux pane for each worktree and runs `opencode run -m <provider>/<model> <prompt>`
 4. **Iteration**: Allows sending additional prompts to specific models
 5. **Selection**: When you `/next` a model:
@@ -163,7 +163,7 @@ To use Kaleidoscope to help develop itself, you can run:
 ```bash
 kaleidoscope --run "go build . && ./kaleidoscope --run 'echo \"hello world\"'"
 ```
-This command will run Kaleidoscope to help implement changes to its own codebase, and then build the updated binary. The inner `go run main.go --run 'echo "hello world"'` command just spins up a simple test command to verify functionality for you to see in the panes.
+This command will run Kaleidoscope to help implement changes to its own codebase, and then build the updated binary. The inner `go build . && ./kaleidoscope --run 'echo \"hello world\"'` command just spins up a simple test command to verify functionality for you to see in the panes.
 
 ## License
 
