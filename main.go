@@ -3292,7 +3292,7 @@ func renderRainbowBox(content string, width, height, padV, padH int) string {
 	stops := []string{"#4D96FF", "#6BCB77", "#F7B801", "#FF6B6B", "#B967FF"}
 	palette := gradientColors(totalInner, stops)
 
-	// Prepare content lines and clamp/pad them to the inner content width
+	// Prepare content lines and wrap/pad them to the inner content width
 	innerContentWidth := totalInner - 2*padH
 	if innerContentWidth < 0 {
 		innerContentWidth = 0
@@ -3304,16 +3304,52 @@ func renderRainbowBox(content string, width, height, padV, padH int) string {
 		maxContentLines = 0
 	}
 	var contentLines []string
+
+	// Helper: take up to `innerContentWidth` display-width worth of runes
 	for _, ln := range rawLines {
 		r := []rune(ln)
-		if len(r) > innerContentWidth {
-			contentLines = append(contentLines, string(r[:innerContentWidth]))
-		} else {
-			// right-pad the line to innerContentWidth
-			pad := strings.Repeat(" ", innerContentWidth-lipgloss.Width(string(r)))
-			contentLines = append(contentLines, string(r)+pad)
+		for len(r) > 0 {
+			if innerContentWidth == 0 {
+				// If no room, push an empty padded line and break to avoid infinite loop
+				contentLines = append(contentLines, strings.Repeat(" ", innerContentWidth))
+				break
+			}
+			// Find the largest slice of runes that fits within innerContentWidth
+			chunkRunes := 0
+			for j := 1; j <= len(r); j++ {
+				if lipgloss.Width(string(r[:j])) > innerContentWidth {
+					break
+				}
+				chunkRunes = j
+			}
+			if chunkRunes == 0 {
+				// force at least one rune to avoid infinite loop; it may overflow visually
+				chunkRunes = 1
+			}
+			chunk := string(r[:chunkRunes])
+			// right-pad the chunk to innerContentWidth using display width
+			padNeeded := innerContentWidth - lipgloss.Width(chunk)
+			if padNeeded < 0 {
+				padNeeded = 0
+			}
+			chunk = chunk + strings.Repeat(" ", padNeeded)
+			contentLines = append(contentLines, chunk)
+			// advance
+			if chunkRunes >= len(r) {
+				r = r[:0]
+			} else {
+				r = r[chunkRunes:]
+			}
+			// If we've collected more than enough lines, we can optionally stop early
+			if len(contentLines) >= maxContentLines {
+				break
+			}
+		}
+		if len(contentLines) >= maxContentLines {
+			break
 		}
 	}
+
 	// Trim or pad contentLines to fit maxContentLines
 	if len(contentLines) > maxContentLines {
 		contentLines = contentLines[:maxContentLines]
