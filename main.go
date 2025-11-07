@@ -2384,17 +2384,7 @@ func (m model) View() string {
 		}
 	}
 
-	promptBorder := lipgloss.Color("#6BCB77")
-	if m.focus == focusPrompt {
-		promptBorder = lipgloss.Color("#4D96FF")
-	}
-	promptBox := lipgloss.NewStyle().
-		Width(promptWidth).Height(promptHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(promptBorder).
-		Padding(1, 1)
-
-	promptView := promptBox.Render(pb.String())
+	promptView := renderRainbowBox(pb.String(), promptWidth, promptHeight, 1, 1)
 
 	// Selected models column next to the prompt
 	selectedCol := m.renderSelectedColumn(selectedWidth)
@@ -2572,16 +2562,11 @@ func (m model) viewIteration() string {
 		}
 	}
 
-	promptBox := lipgloss.NewStyle().
-		Width(promptWidth).Height(promptHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#4D96FF")).
-		Padding(1, 2)
-
 	label := lipgloss.NewStyle().Faint(true).Render("iteration prompt")
 	hint := lipgloss.NewStyle().Faint(true).Render("commands: /bail /retry /next <instance> /wrap <instance> | @<instance> <prompt>")
 	tmuxHint := lipgloss.NewStyle().Faint(true).Render("tmux: Ctrl-b then arrow keys to move between panes")
-	promptView := label + "\n" + promptBox.Render(pb.String()) + "\n" + hint + "\n" + tmuxHint
+	// Use the rainbow border renderer for the main iteration prompt
+	promptView := label + "\n" + renderRainbowBox(pb.String(), promptWidth, promptHeight, 1, 2) + "\n" + hint + "\n" + tmuxHint
 
 	if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
 		var acList strings.Builder
@@ -2700,17 +2685,8 @@ func (m model) viewNewTask() string {
 		}
 	}
 
-	promptBorder := lipgloss.Color("#6BCB77")
-	if m.newTaskFocus == focusPrompt {
-		promptBorder = lipgloss.Color("#4D96FF")
-	}
-	promptBox := lipgloss.NewStyle().
-		Width(promptWidth).Height(promptHeight).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(promptBorder).
-		Padding(1, 2)
-
-	promptView := promptBox.Render(pb.String())
+	// Use rainbow border renderer for the new-task prompt instead of lipgloss BorderForeground
+	promptView := renderRainbowBox(pb.String(), promptWidth, promptHeight, 1, 2)
 
 	topGap := "  "
 	row := lipgloss.JoinHorizontal(lipgloss.Top, taskView, topGap, promptView)
@@ -3271,6 +3247,135 @@ func hexToRGB(h string) (int, int, int) {
 	g, _ := strconv.ParseInt(h[2:4], 16, 64)
 	b, _ := strconv.ParseInt(h[4:6], 16, 64)
 	return int(r), int(g), int(b)
+}
+
+// renderRainbowBox renders `content` inside a rounded box whose border is
+// colored with a left→right rainbow gradient. `width` and `height` indicate
+// the full box dimensions including borders. `padV` and `padH` specify the
+// inner vertical and horizontal padding (in spaces).
+func renderRainbowBox(content string, width, height, padV, padH int) string {
+	// Fallback: if width is too small, just return content
+	if width <= 0 {
+		return content
+	}
+	if width < 4 || height < 3 {
+		// Not enough room for a border; just trim/pad content to width
+		lines := strings.Split(content, "\n")
+		for i := range lines {
+			runes := []rune(lines[i])
+			if len(runes) > width {
+				lines[i] = string(runes[:width])
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// Compute inner width (space available for padding + content)
+	totalInner := width - 2 // exclude left/right border chars
+	if totalInner < 1 {
+		return content
+	}
+
+	// Build a palette spanning the horizontal span of the inner area
+	stops := []string{"#4D96FF", "#6BCB77", "#F7B801", "#FF6B6B", "#B967FF"}
+	palette := gradientColors(totalInner, stops)
+
+	// Prepare content lines and clamp/pad them to the inner content width
+	innerContentWidth := totalInner - 2*padH
+	if innerContentWidth < 0 {
+		innerContentWidth = 0
+	}
+	rawLines := strings.Split(content, "\n")
+	// Ensure we have exactly the number of content lines that fit into height
+	maxContentLines := height - 2 - 2*padV // exclude top/bottom borders and vertical padding
+	if maxContentLines < 0 {
+		maxContentLines = 0
+	}
+	var contentLines []string
+	for _, ln := range rawLines {
+		r := []rune(ln)
+		if len(r) > innerContentWidth {
+			contentLines = append(contentLines, string(r[:innerContentWidth]))
+		} else {
+			// right-pad the line to innerContentWidth
+			pad := strings.Repeat(" ", innerContentWidth-lipgloss.Width(string(r)))
+			contentLines = append(contentLines, string(r)+pad)
+		}
+	}
+	// Trim or pad contentLines to fit maxContentLines
+	if len(contentLines) > maxContentLines {
+		contentLines = contentLines[:maxContentLines]
+	} else if len(contentLines) < maxContentLines {
+		for len(contentLines) < maxContentLines {
+			contentLines = append(contentLines, strings.Repeat(" ", innerContentWidth))
+		}
+	}
+
+	// Build top border colored across totalInner columns
+	var topBuilder strings.Builder
+	// Color the left-top corner with the first palette color
+	topBuilder.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(palette[0])).Render("╭"))
+	for i := 0; i < totalInner; i++ {
+		c := lipgloss.Color(palette[i])
+		topBuilder.WriteString(lipgloss.NewStyle().Foreground(c).Render("─"))
+	}
+	// Color the right-top corner with the last palette color
+	topBuilder.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(palette[len(palette)-1])).Render("╮"))
+	top := topBuilder.String()
+
+	// Build bottom border
+	var bottomBuilder strings.Builder
+	// Color the left-bottom corner with the first palette color
+	bottomBuilder.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(palette[0])).Render("╰"))
+	for i := 0; i < totalInner; i++ {
+		c := lipgloss.Color(palette[i])
+		bottomBuilder.WriteString(lipgloss.NewStyle().Foreground(c).Render("─"))
+	}
+	// Color the right-bottom corner with the last palette color
+	bottomBuilder.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(palette[len(palette)-1])).Render("╯"))
+	bottom := bottomBuilder.String()
+
+	// Colors for left and right vertical bars: use ends of palette
+	leftColor := lipgloss.Color(palette[0])
+	rightColor := lipgloss.Color(palette[len(palette)-1])
+
+	var bodyBuilder strings.Builder
+	bodyBuilder.WriteString(top)
+	bodyBuilder.WriteString("\n")
+
+	// Top vertical padding
+	for pv := 0; pv < padV; pv++ {
+		bodyBuilder.WriteString(lipgloss.NewStyle().Foreground(leftColor).Render("│"))
+		bodyBuilder.WriteString(strings.Repeat(" ", totalInner))
+		bodyBuilder.WriteString(lipgloss.NewStyle().Foreground(rightColor).Render("│"))
+		bodyBuilder.WriteString("\n")
+	}
+
+	// Content rows
+	for _, ln := range contentLines {
+		bodyBuilder.WriteString(lipgloss.NewStyle().Foreground(leftColor).Render("│"))
+		// left horizontal padding
+		bodyBuilder.WriteString(strings.Repeat(" ", padH))
+		// content (already padded/truncated to innerContentWidth)
+		bodyBuilder.WriteString(ln)
+		// right horizontal padding
+		bodyBuilder.WriteString(strings.Repeat(" ", padH))
+		bodyBuilder.WriteString(lipgloss.NewStyle().Foreground(rightColor).Render("│"))
+		bodyBuilder.WriteString("\n")
+	}
+
+	// Bottom vertical padding
+	for pv := 0; pv < padV; pv++ {
+		bodyBuilder.WriteString(lipgloss.NewStyle().Foreground(leftColor).Render("│"))
+		bodyBuilder.WriteString(strings.Repeat(" ", totalInner))
+		bodyBuilder.WriteString(lipgloss.NewStyle().Foreground(rightColor).Render("│"))
+		bodyBuilder.WriteString("\n")
+	}
+
+	bodyBuilder.WriteString(bottom)
+
+	// Place horizontally to requested width (so caller can center)
+	return lipgloss.PlaceHorizontal(width, lipgloss.Left, bodyBuilder.String())
 }
 
 // selectedModels returns selected model names for the current provider
