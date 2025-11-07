@@ -3598,20 +3598,22 @@ func main() {
 
 		fmt.Fprintln(os.Stderr, "Not inside a tmux session; attempting to start or attach one...")
 
-		// Build tmux args to create or attach a session and run this program inside it.
-		// Use '-A' to attach if the session exists. Session name is configurable via
-		// the -tmux-session flag or KALEIDOSCOPE_TMUX_SESSION env var.
+		// Build tmux args to create a new, unique session and run this program inside it.
+		// To avoid multiple invocations attaching to the same session we always create
+		// a session with a unique suffix (pid + timestamp) rather than using '-A'.
 		sessionName := *tmuxSession
-		tmuxArgs := append([]string{"new-session", "-A", "-s", sessionName, "--", os.Args[0]}, os.Args[1:]...)
+		uniqueSession := fmt.Sprintf("%s-%d-%d", sessionName, os.Getpid(), time.Now().UnixNano())
+		fmt.Fprintln(os.Stderr, "Starting tmux session:", uniqueSession)
+		tmuxArgs := append([]string{"new-session", "-s", uniqueSession, "--", os.Args[0]}, os.Args[1:]...)
 		cmd := exec.Command("tmux", tmuxArgs...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		// Run will attach the current terminal to tmux and execute the program
-		// inside the tmux session. If it succeeds, the child tmux session will
-		// run the program and we should exit this parent process.
+		// Run will start a new tmux session and execute the program inside it.
+		// If it succeeds, the child tmux session will run the program and we should
+		// exit this parent process.
 		if err := cmd.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, "Error: failed to start/attach tmux session:", err)
+			fmt.Fprintln(os.Stderr, "Error: failed to start tmux session:", err)
 			fmt.Fprintln(os.Stderr, "Please start tmux and re-run")
 			os.Exit(1)
 		}
