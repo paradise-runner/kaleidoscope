@@ -1997,27 +1997,24 @@ func nextCmd(m model, modelName string) tea.Cmd {
 			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
 		}
 
-		// Kill only the pane associated with this model (if known)
-		paneID := m.modelToPaneID[modelName]
-		if paneID != "" {
-			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+		// Kill all panes opened by this session
+		for _, p := range m.createdPanes {
+			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", p})
 		}
 
-		// Remove only this worktree/branch
-		wtPath := filepath.Join(parentDir, worktree)
-		cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
-		cmd.Run()
-
-		cmd = exec.Command("git", "branch", "-D", worktree)
-		cmd.Run()
-
-		msgText := fmt.Sprintf("Next complete: merged %s and cleaned up", modelName)
-		if paneID == "" {
-			msgText = fmt.Sprintf("Next complete: merged %s (pane not found)", modelName)
+		// Remove all worktrees and branches created by this session
+		for _, wt := range m.createdWorktrees {
+			wtPath := filepath.Join(parentDir, wt)
+			cmd = exec.Command("git", "worktree", "remove", wtPath, "--force")
+			cmd.Run()
+			cmd = exec.Command("git", "branch", "-D", wt)
+			cmd.Run()
 		}
+
+		msgText := fmt.Sprintf("Next complete: merged %s and cleaned up %d pane(s)", modelName, len(m.createdPanes))
 		_, _, _ = tmux.RunCmd([]string{"display-message", msgText})
 
-		return nextCompleteMsg{Model: modelName, PaneID: paneID, Worktree: worktree}
+		return nextCompleteMsg{Model: modelName, PaneID: "", Worktree: ""}
 	}
 }
 
@@ -2519,8 +2516,8 @@ func (m model) viewIteration() string {
 	// Hints (label, commands hint, tmux hint) = 3 lines
 	// Bottom bar = 1-2 lines
 	// Leave small buffer above bottom bar for breathing room
-	reservedTop := 2         // minimal spacing at top
-	reservedBottom := 5      // hints + buffer + bottom bar
+	reservedTop := 2    // minimal spacing at top
+	reservedBottom := 5 // hints + buffer + bottom bar
 	availableHeight := m.height - reservedTop - reservedBottom
 	if availableHeight < 8 {
 		availableHeight = 8
@@ -2612,7 +2609,7 @@ func (m model) viewIteration() string {
 	}
 
 	centeredPrompt := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, promptView)
-	
+
 	// Position content with minimal spacing at top
 	body := centeredPrompt
 	return m.renderWithBottomBar(body)
