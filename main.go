@@ -307,6 +307,9 @@ type model struct {
 		row int
 		col int
 	}
+	// Collapsed paste handling for main prompt
+	promptPastes map[string]string // token -> original content
+	pasteCounter int               // to generate unique tokens
 
 	// Branch name (single line)
 	branch       string
@@ -481,6 +484,8 @@ func initialModel(runCmd string, setDefault bool) model {
 		modelToPaneID:    map[string]string{},
 		modelToWorktree:  map[string]string{},
 		modelPrompts:     map[string][]string{},
+		promptPastes:     map[string]string{},
+		pasteCounter:     0,
 		newTaskPrompt:    []string{""},
 		newTaskFocus:     focusTask,
 		setDefault:       setDefault,
@@ -490,6 +495,7 @@ func initialModel(runCmd string, setDefault bool) model {
 		progressMsg:      "",
 		pendingEsc:       false,
 	}
+
 	// Load per-repo history and initialize indices/drafts
 	m.history = loadHistoryForRepo()
 	if m.history == nil {
@@ -529,6 +535,126 @@ func isWordByte(b byte) bool {
 	// Treat any non-whitespace byte as a word character so Option/Alt
 	// word movements and Option+Delete include punctuation like ',' and '.'.
 	return b != ' ' && b != '\t' && b != '\n'
+}
+
+// Paste placeholder token markers
+const pasteTokenPrefix = "[[PASTE#"
+const pasteTokenSuffix = "]]"
+
+func (m *model) makePasteToken() string {
+	m.pasteCounter++
+	return fmt.Sprintf("%s%d%s", pasteTokenPrefix, m.pasteCounter, pasteTokenSuffix)
+}
+
+// promptDisplayWidth approximates inner content width of the prompt box.
+func (m model) promptDisplayWidth() int {
+	// Mirror logic from View() for promptWidth and renderRainbowBox paddings
+	smallScreen := (m.width > 0 && m.width < 90) || (m.height > 0 && m.height < 20)
+	promptWidth := 10
+	if smallScreen {
+		promptWidth = m.width - 4
+		if promptWidth < 20 {
+			promptWidth = m.width
+		}
+	} else {
+		promptWidth = int(float64(m.width) * 0.5)
+		if promptWidth < 40 {
+			promptWidth = 40
+		}
+	}
+	inner := promptWidth - 2 - 2*1 // borders and padH=1 in renderRainbowBox
+	if inner < 1 {
+		inner = 1
+	}
+	return inner
+}
+
+// isLongPaste determines if pasted text should be collapsed.
+// Heuristic: collapse if there are >2 explicit lines, or if word-wrapped
+// into ~contentWidth/6 words per line would exceed 2 lines.
+func (m model) isLongPaste(s string) bool {
+	if s == "" {
+		return false
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > 2 {
+		return true
+	}
+	// Words-based approximation
+	words := len(strings.Fields(s))
+	cw := m.promptDisplayWidth()
+	wordsPerLine := cw / 6
+	if wordsPerLine < 1 {
+		wordsPerLine = 1
+	}
+	approxLines := (words + wordsPerLine - 1) / wordsPerLine
+	return approxLines > 2
+}
+
+// tokenRangesInLine finds all paste tokens in a line and returns byte ranges.
+func tokenRangesInLine(line string) []struct {
+	start, end int
+	token      string
+} {
+	var out []struct {
+		start, end int
+		token      string
+	}
+	search := line
+	base := 0
+	for {
+		i := strings.Index(search, pasteTokenPrefix)
+		if i < 0 {
+			break
+		}
+		start := base + i
+		j := strings.Index(search[i:], pasteTokenSuffix)
+		if j < 0 {
+			break
+		}
+		end := start + (j + len(pasteTokenSuffix) + i)
+		// extract token string
+		tok := line[start:end]
+		out = append(out, struct {
+			start, end int
+			token      string
+		}{start: start, end: end, token: tok})
+		// advance
+		advance := i + j + len(pasteTokenSuffix)
+		base += advance
+		if advance >= len(search) {
+			break
+		}
+		search = search[advance:]
+	}
+	return out
+}
+
+// tokenRangeContaining returns the token range that contains index idx, if any.
+func tokenRangeContaining(line string, idx int) (start, end int, token string, ok bool) {
+	for _, r := range tokenRangesInLine(line) {
+		if idx >= r.start && idx < r.end {
+			return r.start, r.end, r.token, true
+		}
+	}
+	return 0, 0, "", false
+}
+
+// clampCursorOutsideToken moves col to token boundary if inside a token.
+func clampCursorOutsideToken(line string, col int, moveRight bool) int {
+	if col < 0 {
+		return 0
+	}
+	if col > len(line) {
+		return len(line)
+	}
+	if start, end, _, ok := tokenRangeContaining(line, col); ok {
+		if moveRight {
+			return end
+		}
+		return start
+	}
+	return col
 }
 
 func wordLeft(line string, col int) int {
@@ -760,7 +886,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenIteration
 			m.createdPanes = append(m.createdPanes, msg.paneIDs...)
 			m.createdWorktrees = append(m.createdWorktrees, msg.worktrees...)
-			initialPrompt := strings.TrimSpace(strings.Join(m.input, "\n"))
+			// Expand any collapsed paste tokens before sending
+			initialPrompt := strings.TrimSpace(m.expandTokens(strings.Join(m.input, "\n")))
 			// Push to history and persist
 			m.history = pushHistorySlice(m.history, initialPrompt)
 			_ = saveHistoryForRepo(m.history)
@@ -843,8 +970,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == focusPrompt {
 				if msg.Runes[0] == 'b' {
 					m.cursor.row, m.cursor.col = moveWordLeftLines(m.input, m.cursor.row, m.cursor.col)
+					// clamp to token boundary if inside
+					line := m.input[m.cursor.row]
+					m.cursor.col = clampCursorOutsideToken(line, m.cursor.col, false)
 				} else {
 					m.cursor.row, m.cursor.col = moveWordRightLines(m.input, m.cursor.row, m.cursor.col)
+					line := m.input[m.cursor.row]
+					m.cursor.col = clampCursorOutsideToken(line, m.cursor.col, true)
 				}
 				return m, nil
 			}
@@ -938,8 +1070,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			// Insert newline in prompt
-			before := m.input[m.cursor.row][:m.cursor.col]
-			after := m.input[m.cursor.row][m.cursor.col:]
+			line := m.input[m.cursor.row]
+			// prevent splitting in middle of a paste token
+			if _, end, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+				// if inside token, move cursor to end before inserting newline
+				m.cursor.col = end
+				line = m.input[m.cursor.row]
+			}
+			before := line[:m.cursor.col]
+			after := line[m.cursor.col:]
 			m.input[m.cursor.row] = before
 			m.input = append(m.input[:m.cursor.row+1], append([]string{after}, m.input[m.cursor.row+1:]...)...)
 			m.cursor.row++
@@ -987,6 +1126,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.focus == focusPrompt {
 				line := m.input[m.cursor.row]
+				// Do not insert spaces inside placeholder tokens
+				if _, _, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+					return m, nil
+				}
 				m.input[m.cursor.row] = line[:m.cursor.col] + " " + line[m.cursor.col:]
 				m.cursor.col++
 				return m, nil
@@ -1056,8 +1199,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			// Prompt backspace
+			line := m.input[m.cursor.row]
+			// If cursor is inside a token, delete the whole token
+			if s, e, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+				m.input[m.cursor.row] = line[:s] + line[e:]
+				m.cursor.col = s
+				return m, nil
+			}
 			if m.cursor.col > 0 {
-				line := m.input[m.cursor.row]
 				m.input[m.cursor.row] = line[:m.cursor.col-1] + line[m.cursor.col:]
 				m.cursor.col--
 			} else if m.cursor.row > 0 {
@@ -1080,6 +1229,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.focus == focusPrompt {
 				line := m.input[m.cursor.row]
+				// If inside a token, delete the entire token from the line start
+				if _, end, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+					m.input[m.cursor.row] = line[end:]
+					m.cursor.col = 0
+					return m, nil
+				}
 				m.input[m.cursor.row], m.cursor.col = deleteLineBackward(line, m.cursor.col)
 				return m, nil
 			}
@@ -1099,7 +1254,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// no left/right in provider/models lists; fall through to prompt
 			if m.cursor.col > 0 {
-				m.cursor.col--
+				newCol := m.cursor.col - 1
+				line := m.input[m.cursor.row]
+				if s, _, _, ok := tokenRangeContaining(line, newCol); ok {
+					m.cursor.col = s
+				} else {
+					m.cursor.col = newCol
+				}
 			} else if m.cursor.row > 0 {
 				m.cursor.row--
 				m.cursor.col = len(m.input[m.cursor.row])
@@ -1119,7 +1280,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			line := m.input[m.cursor.row]
 			if m.cursor.col < len(line) {
-				m.cursor.col++
+				newCol := m.cursor.col + 1
+				// If newCol is inside a token, jump to end of that token
+				if s, e, _, ok := tokenRangeContaining(line, newCol); ok {
+					_ = s
+					m.cursor.col = e
+				} else {
+					m.cursor.col = newCol
+				}
 			} else if m.cursor.row < len(m.input)-1 {
 				m.cursor.row++
 				m.cursor.col = 0
@@ -1212,6 +1380,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.pendingEsc {
 					m.pendingEsc = false
 				}
+				// Handle bracketed paste specially in the main prompt
+				if msg.Paste && m.focus == focusPrompt {
+					paste := string(msg.Runes)
+					line := m.input[m.cursor.row]
+					// Don't insert inside a token
+					if _, _, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+						return m, nil
+					}
+					if m.isLongPaste(paste) {
+						if m.promptPastes == nil {
+							m.promptPastes = make(map[string]string)
+						}
+						tok := m.makePasteToken()
+						m.promptPastes[tok] = paste
+						m.input[m.cursor.row] = line[:m.cursor.col] + tok + line[m.cursor.col:]
+						m.cursor.col += len(tok)
+						return m, nil
+					}
+					// Short paste (<=2 lines by heuristic): insert with newlines
+					parts := strings.Split(paste, "\n")
+					before := line[:m.cursor.col]
+					after := line[m.cursor.col:]
+					if len(parts) == 1 {
+						m.input[m.cursor.row] = before + parts[0] + after
+						m.cursor.col = len(before) + len(parts[0])
+						return m, nil
+					}
+					// multiple lines: splice
+					m.input[m.cursor.row] = before + parts[0]
+					inserted := make([]string, 0, len(parts)-1)
+					inserted = append(inserted, parts[1:len(parts)-1]...)
+					inserted = append(inserted, parts[len(parts)-1]+after)
+					m.input = append(m.input[:m.cursor.row+1], append(inserted, m.input[m.cursor.row+1:]...)...)
+					m.cursor.row += len(parts) - 1
+					m.cursor.col = len(parts[len(parts)-1])
+					return m, nil
+				}
 				r := string(msg.Runes)
 				if m.focus == focusBranch {
 					m.branch = m.branch[:m.branchCursor] + r + m.branch[m.branchCursor:]
@@ -1228,6 +1433,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				line := m.input[m.cursor.row]
+				// Avoid inserting in the middle of a placeholder token
+				if _, _, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+					return m, nil
+				}
 				m.input[m.cursor.row] = line[:m.cursor.col] + r + line[m.cursor.col:]
 				m.cursor.col += len(r)
 			}
@@ -1319,7 +1528,7 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				parts := strings.SplitN(currentLine, " ", 2)
 				if len(parts) == 2 {
 					modelName := strings.TrimPrefix(parts[0], "@")
-					prompt := parts[1]
+					prompt := m.expandTokens(parts[1])
 					if paneID, ok := m.modelToPaneID[modelName]; ok {
 						m.modelPrompts[modelName] = append(m.modelPrompts[modelName], prompt)
 						// Push to per-repo history and persist
@@ -1820,7 +2029,7 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 				return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 			}
 			provider := m.currentProvider() // capture provider at open time
-			prompt := strings.Join(m.input, "\n")
+			prompt := m.expandTokens(strings.Join(m.input, "\n"))
 			modelFull := provider + "/" + baseName
 			// Append configured run command if provided
 			runPart := ""
@@ -2350,46 +2559,54 @@ func (m model) View() string {
 	taskLabel := lipgloss.NewStyle().Faint(true).Render("task-name")
 	branchView := branchLabel + "\n" + branchBox.Render(branchInner) + "\n\n" + taskLabel + "\n" + taskBox.Render(taskInner)
 
-	// Render prompt buffer with block cursor
+	// Render prompt buffer with block cursor, showing collapsed paste tokens
 	var pb strings.Builder
+	pasteStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#B967FF")).Bold(true)
 	for i, line := range m.input {
+		// Render line with tokens highlighted
+		renderLine := func(s string) string {
+			if s == "" {
+				return ""
+			}
+			var b strings.Builder
+			pos := 0
+			for _, r := range tokenRangesInLine(s) {
+				if r.start > pos {
+					b.WriteString(s[pos:r.start])
+				}
+				b.WriteString(pasteStyle.Render("[PASTED TEXT]"))
+				pos = r.end
+			}
+			if pos < len(s) {
+				b.WriteString(s[pos:])
+			}
+			return b.String()
+		}
+
 		if i == m.cursor.row {
 			col := m.cursor.col
 			if col > len(line) {
 				col = len(line)
 			}
-			pb.WriteString(line[:col])
-			if m.focus == focusPrompt && m.cursorVisible {
-				if col < len(line) {
-					// Replace rune under cursor to avoid shifting
-					runes := []rune(line)
-					// compute rune index corresponding to byte col
-					byteIndex := 0
-					runeIndex := 0
-					for i := range runes {
-						if byteIndex >= col {
-							break
-						}
-						byteIndex += len(string(runes[i]))
-						runeIndex++
-					}
-					if runeIndex < len(runes) {
-						curBlock := lipgloss.NewStyle().Reverse(true).Render(string(runes[runeIndex]))
-						// write remainder starting after that rune
-						remaining := string(runes[runeIndex+1:])
-						pb.WriteString(curBlock)
-						pb.WriteString(remaining)
-						// we've already written the remainder, so skip the normal append below
-						continue
-					}
+			// If cursor inside a token, render cursor as reverse on the placeholder
+			if start, end, _, ok := tokenRangeContaining(line, col); ok {
+				left := renderLine(line[:start])
+				mid := pasteStyle.Render("[PASTED TEXT]")
+				if m.focus == focusPrompt && m.cursorVisible {
+					mid = lipgloss.NewStyle().Reverse(true).Render(mid)
 				}
-				// End-of-line: show reversed space
-				curBlock := lipgloss.NewStyle().Reverse(true).Render(" ")
-				pb.WriteString(curBlock)
+				right := renderLine(line[end:])
+				pb.WriteString(left + mid + right)
+			} else {
+				// Normal cursor behavior on non-token text: show reversed space at boundary
+				pb.WriteString(renderLine(line[:col]))
+				if m.focus == focusPrompt && m.cursorVisible {
+					pb.WriteString(lipgloss.NewStyle().Reverse(true).Render(" "))
+				}
+				pb.WriteString(renderLine(line[col:]))
 			}
-			pb.WriteString(line[col:])
 		} else {
-			pb.WriteString(line)
+			pb.WriteString(renderLine(line))
 		}
 		if i < len(m.input)-1 {
 			pb.WriteString("\n")
@@ -3440,6 +3657,18 @@ func (m model) selectedModels() []string {
 				out = append(out, name)
 			}
 		}
+	}
+	return out
+}
+
+// expandTokens replaces all placeholder paste tokens with their original content.
+func (m model) expandTokens(s string) string {
+	if m.promptPastes == nil || len(m.promptPastes) == 0 || s == "" {
+		return s
+	}
+	out := s
+	for tok, val := range m.promptPastes {
+		out = strings.ReplaceAll(out, tok, val)
 	}
 	return out
 }
