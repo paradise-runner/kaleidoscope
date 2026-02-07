@@ -2159,12 +2159,12 @@ func (m model) View() string {
 			}
 			var b strings.Builder
 			pos := 0
-			for _, r := range editor.TokenRangesInLine(s) {
-				if r.Start > pos {
-					b.WriteString(s[pos:r.Start])
+			for _, tokenRange := range editor.TokenRangesInLine(s) {
+				if tokenRange.Start > pos {
+					b.WriteString(s[pos:tokenRange.Start])
 				}
 				b.WriteString(pasteStyle.Render("[PASTED TEXT]"))
-				pos = r.End
+				pos = tokenRange.End
 			}
 			if pos < len(s) {
 				b.WriteString(s[pos:])
