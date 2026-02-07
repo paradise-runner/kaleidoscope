@@ -79,4 +79,3 @@ func TestProviderNamesExcludesLegacy(t *testing.T) {
 		}
 	}
 }
-

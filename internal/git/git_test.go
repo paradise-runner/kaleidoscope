@@ -55,13 +55,12 @@ func TestGetFeatureBranchDefault(t *testing.T) {
 	// In a real repo, we can't control what branch we're on, so we just verify
 	// it returns a string (possibly empty)
 	result := GetFeatureBranchDefault()
-	
+
 	// Result should be either empty (if on standard branch or error) or a branch name
 	t.Logf("GetFeatureBranchDefault returned: %q", result)
-	
+
 	// If we got a result, it should not be a standard branch
 	if result != "" && IsStandardBranch(result) {
 		t.Errorf("GetFeatureBranchDefault returned standard branch %q, should return empty string", result)
 	}
 }
-
