@@ -253,9 +253,16 @@ func initialModel(runCmd string, setDefault bool) model {
 
 	defaults := config.LoadDefaults()
 	if defaults != nil {
-		for i, providerName := range provider.ProviderNames {
+		// Use AllProviderNames for backward compatibility with legacy config entries
+		for _, providerName := range provider.AllProviderNames {
 			if providerName == defaults.Provider {
-				providerIndex = i
+				// Map to UI provider index (excluding legacy entries)
+				for j, uiProvider := range provider.ProviderNames {
+					if uiProvider == providerName {
+						providerIndex = j
+						break
+					}
+				}
 				break
 			}
 		}
@@ -270,7 +277,7 @@ func initialModel(runCmd string, setDefault bool) model {
 		}
 	}
 
-	initialBranch, _ := git.GetCurrentBranch()
+	initialBranch := git.GetFeatureBranchDefault()
 
 	m := model{
 		input:            []string{""},

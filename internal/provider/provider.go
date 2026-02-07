@@ -12,8 +12,21 @@ var Providers = map[string][]string{
 	"OpenAI":         {}, // Legacy entry, preserved for compatibility
 }
 
-// ProviderNames is the ordered list of provider names
+// ProviderNames is the ordered list of provider names for UI display
+// This excludes legacy aliases like "OpenAI" which are only used for config compatibility
 var ProviderNames = []string{
+	"github-copilot",
+	"openai",
+	"anthropic",
+	"opencode",
+	"openrouter",
+	"lmstudio",
+	"amazon-bedrock",
+}
+
+// AllProviderNames includes legacy provider names for config compatibility
+// Use ProviderNames for UI display instead
+var AllProviderNames = []string{
 	"github-copilot",
 	"openai",
 	"anthropic",

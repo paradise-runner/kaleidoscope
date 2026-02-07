@@ -56,7 +56,7 @@ func TestLoadSaveHistoryRoundTrip(t *testing.T) {
 	}
 }
 
-func TestHistoryMaxTrimming(t *testing.T) {
+func TestSaveAndLoadLargeHistory(t *testing.T) {
 	// Create temp directory for testing
 	tmpDir, err := os.MkdirTemp("", "kaleidoscope-test-*")
 	if err != nil {
@@ -82,7 +82,7 @@ func TestHistoryMaxTrimming(t *testing.T) {
 	}
 
 	// Note: The actual trimming logic would be in main.go when adding to history
-	// This test just verifies we can save and load large history
+	// This test verifies we can save and load history larger than MaxHistory
 	if err := SaveForRepo(largeHistory); err != nil {
 		t.Fatalf("SaveForRepo failed: %v", err)
 	}
