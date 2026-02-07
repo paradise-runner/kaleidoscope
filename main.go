@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha1"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"math"
@@ -15,184 +13,20 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	tmux "github.com/jubnzv/go-tmux"
+
+	"kaleidoscope/internal/config"
+	"kaleidoscope/internal/editor"
+	"kaleidoscope/internal/git"
+	"kaleidoscope/internal/history"
+	"kaleidoscope/internal/provider"
+	kstmux "kaleidoscope/internal/tmux"
 )
 
 const escDelay = 150 * time.Millisecond
 const exitDoublePressWindow = 500 * time.Millisecond
-const historyMax = 20
-
-type kaleidoscopeDefaults struct {
-	Provider string                    `json:"provider"`
-	Models   map[string][]string       `json:"models"`
-	Choices  map[string]map[string]int `json:"choices"`
-}
-
-func loadDefaults() *kaleidoscopeDefaults {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil
-	}
-
-	configPath := filepath.Join(cwd, ".kaleidoscope")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil
-	}
-
-	var defaults kaleidoscopeDefaults
-	if err := json.Unmarshal(data, &defaults); err != nil {
-		return nil
-	}
-
-	return &defaults
-}
-
-func incrementChoice(provider string, model string) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-
-	configPath := filepath.Join(cwd, ".kaleidoscope")
-
-	defaults := loadDefaults()
-	if defaults == nil {
-		defaults = &kaleidoscopeDefaults{
-			Provider: provider,
-			Models:   make(map[string][]string),
-			Choices:  make(map[string]map[string]int),
-		}
-	}
-
-	if defaults.Choices == nil {
-		defaults.Choices = make(map[string]map[string]int)
-	}
-
-	if defaults.Choices[provider] == nil {
-		defaults.Choices[provider] = make(map[string]int)
-	}
-
-	defaults.Choices[provider][model]++
-
-	data, err := json.MarshalIndent(defaults, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(configPath, data, 0644)
-}
-
-func saveDefaults(provider string, selected map[string]map[string]int) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-
-	configPath := filepath.Join(cwd, ".kaleidoscope")
-
-	existing := loadDefaults()
-	var choices map[string]map[string]int
-	if existing != nil && existing.Choices != nil {
-		choices = existing.Choices
-	} else {
-		choices = make(map[string]map[string]int)
-	}
-
-	models := make(map[string][]string)
-	for prov, sel := range selected {
-		var selectedModels []string
-		for model, count := range sel {
-			if count > 0 {
-				for i := 0; i < count; i++ {
-					selectedModels = append(selectedModels, model)
-				}
-			}
-		}
-		if len(selectedModels) > 0 {
-			models[prov] = selectedModels
-		}
-	}
-
-	defaults := kaleidoscopeDefaults{
-		Provider: provider,
-		Models:   models,
-		Choices:  choices,
-	}
-
-	data, err := json.MarshalIndent(defaults, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(configPath, data, 0644)
-}
-
-// History helpers - persist per-repo history in tmp directory with migration
-func repoHistoryFilePath() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	abs, err := filepath.Abs(cwd)
-	if err != nil {
-		abs = cwd
-	}
-	hash := sha1.Sum([]byte(abs))
-	dir := filepath.Join(os.TempDir(), "kaleidoscope-history")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	file := filepath.Join(dir, fmt.Sprintf("%x.json", hash))
-	return file, nil
-}
-
-func loadHistoryForRepo() []string {
-	path, err := repoHistoryFilePath()
-	if err == nil {
-		if data, err := os.ReadFile(path); err == nil {
-			var h []string
-			if jsonErr := json.Unmarshal(data, &h); jsonErr == nil {
-				return h
-			}
-		}
-	}
-
-	// Migrate from old per-repo file if present
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil
-	}
-	oldPath := filepath.Join(cwd, ".kaleidoscope_history.json")
-	data, err := os.ReadFile(oldPath)
-	if err != nil {
-		return nil
-	}
-	var h []string
-	if jsonErr := json.Unmarshal(data, &h); jsonErr != nil {
-		return nil
-	}
-	if newPath, e := repoHistoryFilePath(); e == nil {
-		_ = os.WriteFile(newPath, data, 0644)
-		_ = os.Remove(oldPath)
-	}
-	return h
-}
-
-func saveHistoryForRepo(h []string) error {
-	path, err := repoHistoryFilePath()
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(h, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
 
 // pushHistorySlice prepends a new entry (most-recent-first), dedupes immediate duplicate,
-// and trims the slice to historyMax.
+// and trims the slice to history.MaxHistory.
 func pushHistorySlice(h []string, entry string) []string {
 	entry = strings.TrimSpace(entry)
 	if entry == "" {
@@ -202,8 +36,8 @@ func pushHistorySlice(h []string, entry string) []string {
 		return h
 	}
 	newH := append([]string{entry}, h...)
-	if len(newH) > historyMax {
-		newH = newH[:historyMax]
+	if len(newH) > history.MaxHistory {
+		newH = newH[:history.MaxHistory]
 	}
 	return newH
 }
@@ -404,15 +238,6 @@ type model struct {
 }
 
 func initialModel(runCmd string, setDefault bool) model {
-	mods := map[string][]string{
-		"opencode":       {"qwen3-coder", "claude-opus-4-1", "kimi-k2", "claude-haiku-4-5", "minimax-m2", "claude-sonnet-4-5", "an-gd4", "gpt-5-codex", "big-pickle", "claude-3-5-haiku", "glm-4.6", "grok-code", "claude-sonnet-4", "gpt-5"},
-		"openai":         {"gpt-4.1-mini", "text-embedding-3-small", "gpt-4", "o1-pro", "gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4.1-mini", "o3-deep-research", "gpt-3.5-turbo", "text-embedding-3-large", "gpt-4-turbo", "o1-preview", "o3-mini", "codex-mini-latest", "gpt-5-nano", "gpt-5-codex", "gpt-4o", "gpt-4.1", "o4-mini", "o1", "gpt-5-mini", "o1-mini", "text-embedding-ada-002", "o3-pro", "gpt-4o-2024-11-20", "o3", "o4-mini-deep-research", "gpt-5-chat-latest", "gpt-4o-mini", "gpt-5", "gpt-5-pro"},
-		"openrouter":     {"moonshotai/kimi-k2", "moonshotai/kimi-k2-0905", "moonshotai/kimi-dev-72b:free", "moonshotai/kimi-k2-thinking", "moonshotai/kimi-k2-0905:exacto", "moonshotai/kimi-k2:free", "thudm/glm-z1-32b:free", "nousresearch/hermes-4-70b", "nousresearch/hermes-4-405b", "nousresearch/deephermes-3-llama-3-8b-preview", "nvidia/nemotron-nano-9b-v2", "x-ai/grok-4", "x-ai/grok-code-fast-1", "x-ai/grok-3", "x-ai/grok-4-fast", "x-ai/grok-3-beta", "x-ai/grok-3-mini-beta", "x-ai/grok-3-mini", "cognitivecomputations/dolphin3.0-mistral-24b", "cognitivecomputations/dolphin3.0-r1-mistral-24b", "deepseek/deepseek-chat-v3.1", "deepseek/deepseek-r1:free", "deepseek/deepseek-v3-base:free", "deepseek/deepseek-v3.1-terminus", "deepseek/deepseek-r1-0528-qwen3-8b:free", "deepseek/deepseek-chat-v3-0324", "deepseek/deepseek-r1-0528:free", "deepseek/deepseek-r1-distill-llama-70b", "deepseek/deepseek-r1-distill-qwen-14b", "deepseek/deepseek-v3.1-terminus:exacto", "featherless/qwerky-72b", "tngtech/deepseek-r1t2-chimera:free", "minimax/minimax-m1", "minimax/minimax-m2:free", "minimax/minimax-01", "google/gemini-2.0-flash-001", "google/gemma-2-9b-it:free", "google/gemini-2.5-flash", "google/gemini-2.5-pro-preview-05-06", "google/gemma-3n-e4b-it", "google/gemini-2.5-flash-lite", "google/gemini-2.5-pro-preview-06-05", "google/gemini-2.5-flash-preview-09-2025", "google/gemini-2.5-pro", "google/gemma-3-12b-it", "google/gemma-3n-e4b-it:free", "google/gemini-2.5-flash-lite-preview-09-2025", "google/gemini-2.0-flash-exp:free", "google/gemma-3-27b-it", "microsoft/mai-ds-r1:free", "openai/gpt-4.1-mini", "openai/gpt-5-chat", "openai/gpt-5-nano", "openai/gpt-5-codex", "openai/gpt-4.1", "openai/gpt-oss-120b:exacto", "openai/o4-mini", "openai/gpt-5-mini", "openai/gpt-5-image", "openai/gpt-oss-20b", "openai/gpt-oss-120b", "openai/gpt-4o-mini", "openai/gpt-5", "openai/gpt-5-pro", "openrouter/horizon-alpha", "openrouter/polaris-alpha", "openrouter/sonoma-sky-alpha", "openrouter/cypher-alpha:free", "openrouter/sonoma-dusk-alpha", "openrouter/horizon-beta", "z-ai/glm-4.5", "z-ai/glm-4.5-air", "z-ai/glm-4.5v", "z-ai/glm-4.6", "z-ai/glm-4.6:exacto", "z-ai/glm-4.5-air:free", "qwen/qwen3-coder", "qwen/qwen3-32b:free", "qwen/qwen3-next-80b-a3b-instruct", "qwen/qwen-2.5-coder-32b-instruct", "qwen/qwen3-235b-a22b:free", "qwen/qwq-32b:free", "qwen/qwen3-30b-a3b-thinking-2507", "qwen/qwen3-30b-a3b:free", "qwen/qwen2.5-vl-72b-instruct", "qwen/qwen3-14b:free", "qwen/qwen3-30b-a3b-instruct-2507", "qwen/qwen3-235b-a22b-thinking-2507", "qwen/qwen2.5-vl-32b-instruct:free", "qwen/qwen2.5-vl-72b-instruct:free", "qwen/qwen3-235b-a22b-07-25:free", "qwen/qwen3-coder:free", "qwen/qwen3-235b-a22b-07-25", "qwen/qwen3-8b:free", "qwen/qwen3-max", "qwen/qwen3-next-80b-a3b-thinking", "qwen/qwen3-coder:exacto", "mistralai/devstral-medium-2507", "mistralai/codestral-2508", "mistralai/mistral-7b-instruct:free", "mistralai/devstral-small-2505", "mistralai/mistral-small-3.2-24b-instruct", "mistralai/devstral-small-2505:free", "mistralai/mistral-small-3.2-24b-instruct:free", "mistralai/mistral-medium-3", "mistralai/mistral-small-3.1-24b-instruct", "mistralai/devstral-small-2507", "mistralai/mistral-medium-3.1", "mistralai/mistral-nemo:free", "rekaai/reka-flash-3", "meta-llama/llama-3.2-11b-vision-instruct", "meta-llama/llama-3.3-70b-instruct:free", "meta-llama/llama-4-scout:free", "anthropic/claude-opus-4", "anthropic/claude-haiku-4.5", "anthropic/claude-opus-4.1", "anthropic/claude-3.7-sonnet", "anthropic/claude-3.5-haiku", "anthropic/claude-sonnet-4", "anthropic/claude-sonnet-4.5", "sarvamai/sarvam-m:free"},
-		"lmstudio":       {"openai/gpt-oss-20b", "qwen/qwen3-30b-a3b-2507", "qwen/qwen3-coder-30b"},
-		"anthropic":      {"claude-opus-4-0", "claude-3-5-sonnet-20241022", "claude-opus-4-1", "claude-haiku-4-5", "claude-3-5-sonnet-20240620", "claude-3-5-haiku-latest", "claude-3-opus-20240229", "claude-sonnet-4-5", "claude-sonnet-4-5-20250929", "claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307", "claude-3-7-sonnet-20250219", "claude-3-7-sonnet-latest", "claude-sonnet-4-0", "claude-opus-4-1-20250805", "claude-3-sonnet-20240229", "claude-haiku-4-5-20251001"},
-		"amazon-bedrock": {"cohere.command-r-plus-v1:0", "anthropic.claude-v2", "anthropic.claude-3-7-sonnet-20250219-v1:0", "anthropic.claude-sonnet-4-20250514-v1:0", "qwen.qwen3-coder-30b-a3b-v1:0", "meta.llama3-2-11b-instruct-v1:0", "anthropic.claude-3-haiku-20240307-v1:0", "meta.llama3-2-90b-instruct-v1:0", "meta.llama3-2-1b-instruct-v1:0", "anthropic.claude-v2:1", "deepseek.v3-v1:0", "cohere.command-light-text-v14", "ai21.jamba-1-5-large-v1:0", "meta.llama3-3-70b-instruct-v1:0", "anthropic.claude-3-opus-20240229-v1:0", "amazon.nova-pro-v1:0", "meta.llama3-1-8b-instruct-v1:0", "qwen.qwen3-32b-v1:0", "anthropic.claude-3-5-sonnet-20240620-v1:0", "anthropic.claude-haiku-4-5-20251001-v1:0", "cohere.command-r-v1:0", "amazon.nova-micro-v1:0", "meta.llama3-1-70b-instruct-v1:0", "meta.llama3-70b-instruct-v1:0", "deepseek.r1-v1:0", "anthropic.claude-3-5-sonnet-20241022-v2:0", "cohere.command-text-v14", "anthropic.claude-opus-4-20250514-v1:0", "qwen.qwen3-coder-480b-a35b-v1:0", "anthropic.claude-sonnet-4-5-20250929-v1:0", "meta.llama3-2-3b-instruct-v1:0", "anthropic.claude-instant-v1", "amazon.nova-premier-v1:0", "anthropic.claude-opus-4-1-20250805-v1:0", "meta.llama4-scout-17b-instruct-v1:0", "ai21.jamba-1-5-mini-v1:0", "meta.llama3-8b-instruct-v1:0", "anthropic.claude-3-sonnet-20240229-v1:0", "meta.llama4-maverick-17b-instruct-v1:0", "qwen.qwen3-235b-a22b-2507-v1:0", "amazon.nova-lite-v1:0", "anthropic.claude-3-5-haiku-20241022-v1:0"},
-		"github-copilot": {"claude-sonnet-4.5", "claude-haiku-4.5", "gpt-5-mini", "gpt-5", "gemini-2.0-flash-001", "claude-opus-4", "grok-code-fast-1", "claude-3.5-sonnet", "o3-mini", "gpt-5-codex", "gpt-4o", "gpt-4.1", "o4-mini", "claude-opus-41", "claude-3.7-sonnet", "gemini-2.5-pro", "o3", "claude-sonnet-4", "claude-3.7-sonnet-thought"},
-	}
 	sel := map[string]map[string]int{
 		"opencode":       {},
 		"openai":         {},
@@ -426,11 +251,10 @@ func initialModel(runCmd string, setDefault bool) model {
 
 	providerIndex := 0
 
-	defaults := loadDefaults()
+	defaults := config.LoadDefaults()
 	if defaults != nil {
-		providers := []string{"github-copilot", "openai", "anthropic", "opencode", "openrouter", "lmstudio", "amazon-bedrock", "OpenAI"}
-		for i, provider := range providers {
-			if provider == defaults.Provider {
+		for i, providerName := range provider.ProviderNames {
+			if providerName == defaults.Provider {
 				providerIndex = i
 				break
 			}
@@ -446,32 +270,18 @@ func initialModel(runCmd string, setDefault bool) model {
 		}
 	}
 
-	initialBranch := ""
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	if out, err := cmd.Output(); err == nil {
-		currentBranch := strings.TrimSpace(string(out))
-		standardBranches := map[string]bool{
-			"main":        true,
-			"master":      true,
-			"dev":         true,
-			"develop":     true,
-			"development": true,
-		}
-		if !standardBranches[currentBranch] {
-			initialBranch = currentBranch
-		}
-	}
+	initialBranch, _ := git.GetCurrentBranch()
 
 	m := model{
 		input:            []string{""},
 		branch:           initialBranch,
 		branchCursor:     len(initialBranch),
 		task:             "",
-		providers:        []string{"github-copilot", "openai", "anthropic", "opencode", "openrouter", "lmstudio", "amazon-bedrock"},
+		providers:        provider.ProviderNames,
 		providerIndex:    providerIndex,
 		providerOpen:     false,
 		providerHover:    0,
-		models:           mods,
+		models:           provider.Providers,
 		selected:         sel,
 		modelsOpen:       false,
 		modelsHover:      0,
@@ -497,7 +307,7 @@ func initialModel(runCmd string, setDefault bool) model {
 	}
 
 	// Load per-repo history and initialize indices/drafts
-	m.history = loadHistoryForRepo()
+	m.history = history.LoadForRepo()
 	if m.history == nil {
 		m.history = []string{}
 	}
@@ -530,20 +340,9 @@ func (m model) providerModels() []string {
 	return m.models[p]
 }
 
-// Simple ASCII word helpers
-func isWordByte(b byte) bool {
-	// Treat any non-whitespace byte as a word character so Option/Alt
-	// word movements and Option+Delete include punctuation like ',' and '.'.
-	return b != ' ' && b != '\t' && b != '\n'
-}
-
-// Paste placeholder token markers
-const pasteTokenPrefix = "[[PASTE#"
-const pasteTokenSuffix = "]]"
-
 func (m *model) makePasteToken() string {
 	m.pasteCounter++
-	return fmt.Sprintf("%s%d%s", pasteTokenPrefix, m.pasteCounter, pasteTokenSuffix)
+	return fmt.Sprintf("%s%d%s", editor.PasteTokenPrefix, m.pasteCounter, editor.PasteTokenSuffix)
 }
 
 // promptDisplayWidth approximates inner content width of the prompt box.
@@ -567,213 +366,6 @@ func (m model) promptDisplayWidth() int {
 		inner = 1
 	}
 	return inner
-}
-
-// isLongPaste determines if pasted text should be collapsed.
-// Heuristic: collapse if there are >2 explicit lines, or if word-wrapped
-// into ~contentWidth/6 words per line would exceed 2 lines.
-func (m model) isLongPaste(s string) bool {
-	if s == "" {
-		return false
-	}
-	lines := strings.Split(s, "\n")
-	if len(lines) > 2 {
-		return true
-	}
-	// Words-based approximation
-	words := len(strings.Fields(s))
-	cw := m.promptDisplayWidth()
-	wordsPerLine := cw / 6
-	if wordsPerLine < 1 {
-		wordsPerLine = 1
-	}
-	approxLines := (words + wordsPerLine - 1) / wordsPerLine
-	return approxLines > 2
-}
-
-// tokenRangesInLine finds all paste tokens in a line and returns byte ranges.
-func tokenRangesInLine(line string) []struct {
-	start, end int
-	token      string
-} {
-	var out []struct {
-		start, end int
-		token      string
-	}
-	search := line
-	base := 0
-	for {
-		i := strings.Index(search, pasteTokenPrefix)
-		if i < 0 {
-			break
-		}
-		start := base + i
-		j := strings.Index(search[i:], pasteTokenSuffix)
-		if j < 0 {
-			break
-		}
-		end := start + (j + len(pasteTokenSuffix) + i)
-		// extract token string
-		tok := line[start:end]
-		out = append(out, struct {
-			start, end int
-			token      string
-		}{start: start, end: end, token: tok})
-		// advance
-		advance := i + j + len(pasteTokenSuffix)
-		base += advance
-		if advance >= len(search) {
-			break
-		}
-		search = search[advance:]
-	}
-	return out
-}
-
-// tokenRangeContaining returns the token range that contains index idx, if any.
-func tokenRangeContaining(line string, idx int) (start, end int, token string, ok bool) {
-	for _, r := range tokenRangesInLine(line) {
-		if idx >= r.start && idx < r.end {
-			return r.start, r.end, r.token, true
-		}
-	}
-	return 0, 0, "", false
-}
-
-// clampCursorOutsideToken moves col to token boundary if inside a token.
-func clampCursorOutsideToken(line string, col int, moveRight bool) int {
-	if col < 0 {
-		return 0
-	}
-	if col > len(line) {
-		return len(line)
-	}
-	if start, end, _, ok := tokenRangeContaining(line, col); ok {
-		if moveRight {
-			return end
-		}
-		return start
-	}
-	return col
-}
-
-func wordLeft(line string, col int) int {
-	if col <= 0 {
-		return 0
-	}
-	i := col
-	// Move left over spaces
-	for i > 0 {
-		c := line[i-1]
-		if c == ' ' || c == '\t' || c == '\n' {
-			i--
-		} else {
-			break
-		}
-	}
-	// Move left over word chars
-	for i > 0 && isWordByte(line[i-1]) {
-		i--
-	}
-	return i
-}
-
-func wordRight(line string, col int) int {
-	n := len(line)
-	if col >= n {
-		return n
-	}
-	i := col
-	// If currently on a space, skip spaces
-	for i < n {
-		c := line[i]
-		if c == ' ' || c == '\t' || c == '\n' {
-			i++
-		} else {
-			break
-		}
-	}
-	// If currently at a word, skip the word
-	for i < n && isWordByte(line[i]) {
-		i++
-	}
-	return i
-}
-
-func moveWordLeftLines(lines []string, row, col int) (int, int) {
-	if row < 0 || row >= len(lines) {
-		return row, col
-	}
-	if col > 0 {
-		return row, wordLeft(lines[row], col)
-	}
-	if row > 0 {
-		row--
-		return row, wordLeft(lines[row], len(lines[row]))
-	}
-	return row, col
-}
-
-func moveWordRightLines(lines []string, row, col int) (int, int) {
-	if row < 0 || row >= len(lines) {
-		return row, col
-	}
-	line := lines[row]
-	if col < len(line) {
-		return row, wordRight(line, col)
-	}
-	if row < len(lines)-1 {
-		row++
-		return row, wordRight(lines[row], 0)
-	}
-	return row, col
-}
-
-// Line navigation helpers: jump to start/end of line,
-// and traverse to previous/next line when already at boundary.
-func lineLeft(lines []string, row, col int) (int, int) {
-	if row < 0 || row >= len(lines) {
-		return row, col
-	}
-	if col > 0 {
-		return row, 0
-	}
-	if row > 0 {
-		return row - 1, 0
-	}
-	return row, col
-}
-
-func lineRight(lines []string, row, col int) (int, int) {
-	if row < 0 || row >= len(lines) {
-		return row, col
-	}
-	lineLen := len(lines[row])
-	if col < lineLen {
-		return row, lineLen
-	}
-	if row < len(lines)-1 {
-		row++
-		return row, len(lines[row])
-	}
-	return row, col
-}
-
-func deleteWordBackward(line string, col int) (newLine string, newCol int) {
-	if col <= 0 {
-		return line, col
-	}
-	newCol = wordLeft(line, col)
-	newLine = line[:newCol] + line[col:]
-	return newLine, newCol
-}
-
-func deleteLineBackward(line string, col int) (newLine string, newCol int) {
-	if col <= 0 {
-		return line, col
-	}
-	newLine = line[col:]
-	return newLine, 0
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -831,7 +423,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.newTaskFocus = focusTask
 		// Surface any error message
 		if msg.ErrorText != "" {
-			_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: %s", msg.ErrorText)})
+			_, _, _ = kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Warning: %s", msg.ErrorText)})
 		}
 		return m, nil
 	case wrapCompleteMsg:
@@ -872,7 +464,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autocompleteActive = false
 		m.autocompleteOptions = nil
 		if msg.ErrorText != "" {
-			_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: %s", msg.ErrorText)})
+			_, _, _ = kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Warning: %s", msg.ErrorText)})
 		}
 		// Quit the TUI after wrap completes.
 		return m, tea.Quit
@@ -890,7 +482,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			initialPrompt := strings.TrimSpace(m.expandTokens(strings.Join(m.input, "\n")))
 			// Push to history and persist
 			m.history = pushHistorySlice(m.history, initialPrompt)
-			_ = saveHistoryForRepo(m.history)
+			_ = history.SaveForRepo(m.history)
 			for i, instanceLabel := range msg.modelNames {
 				m.modelToPaneID[instanceLabel] = msg.paneIDs[i]
 				m.modelToWorktree[instanceLabel] = msg.worktrees[i]
@@ -909,11 +501,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if msg.err != nil {
-				_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: some panes failed to open: %s", msg.err)})
+				_, _, _ = kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Warning: some panes failed to open: %s", msg.err)})
 			}
 		} else if msg.err != nil {
 			// Nothing opened and we have an error
-			_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Failed to open panes: %s", msg.err)})
+			_, _, _ = kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Failed to open panes: %s", msg.err)})
 		}
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -953,30 +545,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingEsc = false
 			if m.focus == focusBranch {
 				if msg.Runes[0] == 'b' {
-					m.branchCursor = wordLeft(m.branch, m.branchCursor)
+					m.branchCursor = editor.WordLeft(m.branch, m.branchCursor)
 				} else {
-					m.branchCursor = wordRight(m.branch, m.branchCursor)
+					m.branchCursor = editor.WordRight(m.branch, m.branchCursor)
 				}
 				return m, nil
 			}
 			if m.focus == focusTask {
 				if msg.Runes[0] == 'b' {
-					m.taskCursor = wordLeft(m.task, m.taskCursor)
+					m.taskCursor = editor.WordLeft(m.task, m.taskCursor)
 				} else {
-					m.taskCursor = wordRight(m.task, m.taskCursor)
+					m.taskCursor = editor.WordRight(m.task, m.taskCursor)
 				}
 				return m, nil
 			}
 			if m.focus == focusPrompt {
 				if msg.Runes[0] == 'b' {
-					m.cursor.row, m.cursor.col = moveWordLeftLines(m.input, m.cursor.row, m.cursor.col)
+					m.cursor.row, m.cursor.col = editor.MoveWordLeftLines(m.input, m.cursor.row, m.cursor.col)
 					// clamp to token boundary if inside
 					line := m.input[m.cursor.row]
-					m.cursor.col = clampCursorOutsideToken(line, m.cursor.col, false)
+					m.cursor.col = editor.ClampCursorOutsideToken(line, m.cursor.col, false)
 				} else {
-					m.cursor.row, m.cursor.col = moveWordRightLines(m.input, m.cursor.row, m.cursor.col)
+					m.cursor.row, m.cursor.col = editor.MoveWordRightLines(m.input, m.cursor.row, m.cursor.col)
 					line := m.input[m.cursor.row]
-					m.cursor.col = clampCursorOutsideToken(line, m.cursor.col, true)
+					m.cursor.col = editor.ClampCursorOutsideToken(line, m.cursor.col, true)
 				}
 				return m, nil
 			}
@@ -1006,7 +598,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.focus == focusPrompt {
-				m.cursor.row, m.cursor.col = lineLeft(m.input, m.cursor.row, m.cursor.col)
+				m.cursor.row, m.cursor.col = editor.LineLeft(m.input, m.cursor.row, m.cursor.col)
 				return m, nil
 			}
 			return m, nil
@@ -1021,7 +613,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.focus == focusPrompt {
-				m.cursor.row, m.cursor.col = lineRight(m.input, m.cursor.row, m.cursor.col)
+				m.cursor.row, m.cursor.col = editor.LineRight(m.input, m.cursor.row, m.cursor.col)
 				return m, nil
 			}
 			return m, nil
@@ -1072,7 +664,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Insert newline in prompt
 			line := m.input[m.cursor.row]
 			// prevent splitting in middle of a paste token
-			if _, end, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+			if _, end, _, ok := editor.TokenRangeContaining(line, m.cursor.col); ok {
 				// if inside token, move cursor to end before inserting newline
 				m.cursor.col = end
 				line = m.input[m.cursor.row]
@@ -1127,7 +719,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == focusPrompt {
 				line := m.input[m.cursor.row]
 				// Do not insert spaces inside placeholder tokens
-				if _, _, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+				if _, _, _, ok := editor.TokenRangeContaining(line, m.cursor.col); ok {
 					return m, nil
 				}
 				m.input[m.cursor.row] = line[:m.cursor.col] + " " + line[m.cursor.col:]
@@ -1138,16 +730,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Alt {
 				// OPTION+delete: delete word backward
 				if m.focus == focusBranch {
-					m.branch, m.branchCursor = deleteWordBackward(m.branch, m.branchCursor)
+					m.branch, m.branchCursor = editor.DeleteWordBackward(m.branch, m.branchCursor)
 					return m, nil
 				}
 				if m.focus == focusTask {
-					m.task, m.taskCursor = deleteWordBackward(m.task, m.taskCursor)
+					m.task, m.taskCursor = editor.DeleteWordBackward(m.task, m.taskCursor)
 					return m, nil
 				}
 				if m.focus == focusPrompt {
 					line := m.input[m.cursor.row]
-					m.input[m.cursor.row], m.cursor.col = deleteWordBackward(line, m.cursor.col)
+					m.input[m.cursor.row], m.cursor.col = editor.DeleteWordBackward(line, m.cursor.col)
 					return m, nil
 				}
 				return m, nil
@@ -1201,7 +793,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Prompt backspace
 			line := m.input[m.cursor.row]
 			// If cursor is inside a token, delete the whole token
-			if s, e, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+			if s, e, _, ok := editor.TokenRangeContaining(line, m.cursor.col); ok {
 				m.input[m.cursor.row] = line[:s] + line[e:]
 				m.cursor.col = s
 				return m, nil
@@ -1220,22 +812,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlU:
 			// CMD+delete: delete line backward (Ctrl-U is standard terminal binding)
 			if m.focus == focusBranch {
-				m.branch, m.branchCursor = deleteLineBackward(m.branch, m.branchCursor)
+				m.branch, m.branchCursor = editor.DeleteLineBackward(m.branch, m.branchCursor)
 				return m, nil
 			}
 			if m.focus == focusTask {
-				m.task, m.taskCursor = deleteLineBackward(m.task, m.taskCursor)
+				m.task, m.taskCursor = editor.DeleteLineBackward(m.task, m.taskCursor)
 				return m, nil
 			}
 			if m.focus == focusPrompt {
 				line := m.input[m.cursor.row]
 				// If inside a token, delete the entire token from the line start
-				if _, end, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+				if _, end, _, ok := editor.TokenRangeContaining(line, m.cursor.col); ok {
 					m.input[m.cursor.row] = line[end:]
 					m.cursor.col = 0
 					return m, nil
 				}
-				m.input[m.cursor.row], m.cursor.col = deleteLineBackward(line, m.cursor.col)
+				m.input[m.cursor.row], m.cursor.col = editor.DeleteLineBackward(line, m.cursor.col)
 				return m, nil
 			}
 			return m, nil
@@ -1256,7 +848,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor.col > 0 {
 				newCol := m.cursor.col - 1
 				line := m.input[m.cursor.row]
-				if s, _, _, ok := tokenRangeContaining(line, newCol); ok {
+				if s, _, _, ok := editor.TokenRangeContaining(line, newCol); ok {
 					m.cursor.col = s
 				} else {
 					m.cursor.col = newCol
@@ -1282,7 +874,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor.col < len(line) {
 				newCol := m.cursor.col + 1
 				// If newCol is inside a token, jump to end of that token
-				if s, e, _, ok := tokenRangeContaining(line, newCol); ok {
+				if s, e, _, ok := editor.TokenRangeContaining(line, newCol); ok {
 					_ = s
 					m.cursor.col = e
 				} else {
@@ -1385,10 +977,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					paste := string(msg.Runes)
 					line := m.input[m.cursor.row]
 					// Don't insert inside a token
-					if _, _, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+					if _, _, _, ok := editor.TokenRangeContaining(line, m.cursor.col); ok {
 						return m, nil
 					}
-					if m.isLongPaste(paste) {
+					if editor.IsLongPaste(paste, m.promptDisplayWidth()) {
 						if m.promptPastes == nil {
 							m.promptPastes = make(map[string]string)
 						}
@@ -1434,7 +1026,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				line := m.input[m.cursor.row]
 				// Avoid inserting in the middle of a placeholder token
-				if _, _, _, ok := tokenRangeContaining(line, m.cursor.col); ok {
+				if _, _, _, ok := editor.TokenRangeContaining(line, m.cursor.col); ok {
 					return m, nil
 				}
 				m.input[m.cursor.row] = line[:m.cursor.col] + r + line[m.cursor.col:]
@@ -1459,12 +1051,12 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlA, tea.KeyHome:
 		m.autocompleteActive = false
 		m.autocompleteOptions = nil
-		m.iterationCursor.row, m.iterationCursor.col = lineLeft(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
+		m.iterationCursor.row, m.iterationCursor.col = editor.LineLeft(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
 		return m, nil
 	case tea.KeyCtrlE, tea.KeyEnd:
 		m.autocompleteActive = false
 		m.autocompleteOptions = nil
-		m.iterationCursor.row, m.iterationCursor.col = lineRight(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
+		m.iterationCursor.row, m.iterationCursor.col = editor.LineRight(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
 		return m, nil
 	case tea.KeyTab:
 		if m.autocompleteActive && len(m.autocompleteOptions) > 0 {
@@ -1533,7 +1125,7 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						m.modelPrompts[modelName] = append(m.modelPrompts[modelName], prompt)
 						// Push to per-repo history and persist
 						m.history = pushHistorySlice(m.history, prompt)
-						_ = saveHistoryForRepo(m.history)
+						_ = history.SaveForRepo(m.history)
 						m.iterationInput = []string{""}
 						m.iterationCursor.row = 0
 						m.iterationCursor.col = 0
@@ -1555,7 +1147,7 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.autocompleteActive = false
 			m.autocompleteOptions = nil
 			line := m.iterationInput[m.iterationCursor.row]
-			m.iterationInput[m.iterationCursor.row], m.iterationCursor.col = deleteWordBackward(line, m.iterationCursor.col)
+			m.iterationInput[m.iterationCursor.row], m.iterationCursor.col = editor.DeleteWordBackward(line, m.iterationCursor.col)
 			return m, nil
 		}
 		if m.iterationCursor.col > 0 {
@@ -1597,7 +1189,7 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.autocompleteActive = false
 		m.autocompleteOptions = nil
 		line := m.iterationInput[m.iterationCursor.row]
-		m.iterationInput[m.iterationCursor.row], m.iterationCursor.col = deleteLineBackward(line, m.iterationCursor.col)
+		m.iterationInput[m.iterationCursor.row], m.iterationCursor.col = editor.DeleteLineBackward(line, m.iterationCursor.col)
 		return m, nil
 	case tea.KeyLeft:
 		m.autocompleteActive = false
@@ -1695,9 +1287,9 @@ func (m model) updateIteration(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.autocompleteActive = false
 			m.autocompleteOptions = nil
 			if msg.Runes[0] == 'b' {
-				m.iterationCursor.row, m.iterationCursor.col = moveWordLeftLines(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
+				m.iterationCursor.row, m.iterationCursor.col = editor.MoveWordLeftLines(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
 			} else {
-				m.iterationCursor.row, m.iterationCursor.col = moveWordRightLines(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
+				m.iterationCursor.row, m.iterationCursor.col = editor.MoveWordRightLines(m.iterationInput, m.iterationCursor.row, m.iterationCursor.col)
 			}
 			return m, nil
 		}
@@ -1756,14 +1348,14 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.newTaskNameCursor = 0
 			return m, nil
 		}
-		m.newTaskCursor.row, m.newTaskCursor.col = lineLeft(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
+		m.newTaskCursor.row, m.newTaskCursor.col = editor.LineLeft(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
 		return m, nil
 	case tea.KeyCtrlE, tea.KeyEnd:
 		if m.newTaskFocus == focusTask {
 			m.newTaskNameCursor = len(m.newTaskName)
 			return m, nil
 		}
-		m.newTaskCursor.row, m.newTaskCursor.col = lineRight(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
+		m.newTaskCursor.row, m.newTaskCursor.col = editor.LineRight(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
 		return m, nil
 	case tea.KeyTab:
 		if m.newTaskFocus == focusTask {
@@ -1804,11 +1396,11 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Alt {
 			// OPTION+delete: delete word backward
 			if m.newTaskFocus == focusTask {
-				m.newTaskName, m.newTaskNameCursor = deleteWordBackward(m.newTaskName, m.newTaskNameCursor)
+				m.newTaskName, m.newTaskNameCursor = editor.DeleteWordBackward(m.newTaskName, m.newTaskNameCursor)
 				return m, nil
 			}
 			line := m.newTaskPrompt[m.newTaskCursor.row]
-			m.newTaskPrompt[m.newTaskCursor.row], m.newTaskCursor.col = deleteWordBackward(line, m.newTaskCursor.col)
+			m.newTaskPrompt[m.newTaskCursor.row], m.newTaskCursor.col = editor.DeleteWordBackward(line, m.newTaskCursor.col)
 			return m, nil
 		}
 		if m.newTaskFocus == focusTask {
@@ -1834,11 +1426,11 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlU:
 		// CMD+delete: delete line backward
 		if m.newTaskFocus == focusTask {
-			m.newTaskName, m.newTaskNameCursor = deleteLineBackward(m.newTaskName, m.newTaskNameCursor)
+			m.newTaskName, m.newTaskNameCursor = editor.DeleteLineBackward(m.newTaskName, m.newTaskNameCursor)
 			return m, nil
 		}
 		line := m.newTaskPrompt[m.newTaskCursor.row]
-		m.newTaskPrompt[m.newTaskCursor.row], m.newTaskCursor.col = deleteLineBackward(line, m.newTaskCursor.col)
+		m.newTaskPrompt[m.newTaskCursor.row], m.newTaskCursor.col = editor.DeleteLineBackward(line, m.newTaskCursor.col)
 		return m, nil
 	case tea.KeyLeft:
 		if m.newTaskFocus == focusTask {
@@ -1901,17 +1493,17 @@ func (m model) updateNewTask(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pendingEsc = false
 			if m.newTaskFocus == focusTask {
 				if msg.Runes[0] == 'b' {
-					m.newTaskNameCursor = wordLeft(m.newTaskName, m.newTaskNameCursor)
+					m.newTaskNameCursor = editor.WordLeft(m.newTaskName, m.newTaskNameCursor)
 				} else {
-					m.newTaskNameCursor = wordRight(m.newTaskName, m.newTaskNameCursor)
+					m.newTaskNameCursor = editor.WordRight(m.newTaskName, m.newTaskNameCursor)
 				}
 				return m, nil
 			}
 			if m.newTaskFocus == focusPrompt {
 				if msg.Runes[0] == 'b' {
-					m.newTaskCursor.row, m.newTaskCursor.col = moveWordLeftLines(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
+					m.newTaskCursor.row, m.newTaskCursor.col = editor.MoveWordLeftLines(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
 				} else {
-					m.newTaskCursor.row, m.newTaskCursor.col = moveWordRightLines(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
+					m.newTaskCursor.row, m.newTaskCursor.col = editor.MoveWordRightLines(m.newTaskPrompt, m.newTaskCursor.row, m.newTaskCursor.col)
 				}
 				return m, nil
 			}
@@ -1972,15 +1564,15 @@ type spinnerTickMsg struct{}
 func openPanesCmd(models []string, m model) tea.Cmd {
 	return func() tea.Msg {
 		if m.setDefault {
-			if err := saveDefaults(m.currentProvider(), m.selected); err != nil {
-				tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to save defaults: %s", err)})
+			if err := config.SaveDefaults(m.currentProvider(), m.selected); err != nil {
+				kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Warning: failed to save defaults: %s", err)})
 			} else {
-				tmux.RunCmd([]string{"display-message", "Saved provider and model defaults to .kaleidoscope"})
+				kstmux.RunCommand([]string{"display-message", "Saved provider and model defaults to .kaleidoscope"})
 			}
 		}
 
-		if !tmux.IsInsideTmux() {
-			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot open panes"})
+		if !kstmux.IsInside() {
+			_, _, _ = kstmux.RunCommand([]string{"display-message", "Not inside tmux; cannot open panes"})
 			return panesOpenedMsg{count: 0, err: fmt.Errorf("not inside tmux")}
 		}
 
@@ -1998,7 +1590,7 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 		cmd.Run()
 
 		// Capture the current pane id to restore focus later
-		paneOut, _, err := tmux.RunCmd([]string{"display-message", "-p", "#{pane_id}"})
+		paneOut, _, err := kstmux.RunCommand([]string{"display-message", "-p", "#{pane_id}"})
 		if err != nil {
 			return panesOpenedMsg{count: 0, err: err}
 		}
@@ -2039,7 +1631,7 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 			bashCmd := fmt.Sprintf("git worktree add -b %s ../%s %s || true; cd ../%s; opencode run -m %s %s%s; exec $SHELL",
 				shellQuote(id), shellQuote(id), shellQuote(branchName), shellQuote(id), shellQuote(modelFull), shellQuote(prompt), runPart)
 
-			out, _, err := tmux.RunCmd([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
+			out, _, err := kstmux.RunCommand([]string{"split-window", "-v", "-P", "-F", "#{pane_id}", "bash", "-lc", bashCmd})
 			if err != nil {
 				lastErr = err
 				continue
@@ -2054,13 +1646,13 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 		}
 
 		// Arrange panes nicely
-		_, _, _ = tmux.RunCmd([]string{"select-layout", "tiled"})
+		_, _, _ = kstmux.RunCommand([]string{"select-layout", "tiled"})
 
 		// Restore focus to the original pane
-		_, _, _ = tmux.RunCmd([]string{"select-pane", "-t", origPaneID})
+		_, _, _ = kstmux.RunCommand([]string{"select-pane", "-t", origPaneID})
 
 		// Inform in tmux status line
-		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Opened %d pane(s)", opened)})
+		_, _, _ = kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Opened %d pane(s)", opened)})
 
 		return panesOpenedMsg{count: opened, err: lastErr, paneIDs: paneIDs, worktrees: worktrees, modelNames: modelNames, providers: providers, baseModels: baseModels}
 	}
@@ -2068,12 +1660,12 @@ func openPanesCmd(models []string, m model) tea.Cmd {
 
 func bailCmd(m model) tea.Cmd {
 	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
+		if !kstmux.IsInside() {
 			return bailCompleteMsg{}
 		}
 
 		for _, paneID := range m.createdPanes {
-			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+			kstmux.RunCommand([]string{"kill-pane", "-t", paneID})
 		}
 
 		cwd, err := os.Getwd()
@@ -2092,7 +1684,7 @@ func bailCmd(m model) tea.Cmd {
 			cmd.Run()
 		}
 
-		tmux.RunCmd([]string{"display-message", "Bail complete: cleaned up panes, worktrees, and branches"})
+		kstmux.RunCommand([]string{"display-message", "Bail complete: cleaned up panes, worktrees, and branches"})
 
 		return bailCompleteMsg{}
 	}
@@ -2100,20 +1692,20 @@ func bailCmd(m model) tea.Cmd {
 
 func retryCmd(m model) tea.Cmd {
 	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
-			_, _, _ = tmux.RunCmd([]string{"display-message", "Not inside tmux; cannot retry"})
+		if !kstmux.IsInside() {
+			_, _, _ = kstmux.RunCommand([]string{"display-message", "Not inside tmux; cannot retry"})
 			return nil
 		}
 
 		// Kill existing panes
 		for _, paneID := range m.createdPanes {
-			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+			_, _, _ = kstmux.RunCommand([]string{"kill-pane", "-t", paneID})
 		}
 
 		// Remove existing worktrees and branches
 		cwd, err := os.Getwd()
 		if err != nil {
-			_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Retry error: %s", err)})
+			_, _, _ = kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Retry error: %s", err)})
 			return nil
 		}
 		parentDir := filepath.Dir(cwd)
@@ -2128,7 +1720,7 @@ func retryCmd(m model) tea.Cmd {
 		// Re-open panes for the currently selected models
 		models := m.selectedModels()
 		if len(models) == 0 {
-			_, _, _ = tmux.RunCmd([]string{"display-message", "Retry: no models selected to open"})
+			_, _, _ = kstmux.RunCommand([]string{"display-message", "Retry: no models selected to open"})
 			return nil
 		}
 
@@ -2139,13 +1731,13 @@ func retryCmd(m model) tea.Cmd {
 
 func nextCmd(m model, modelName string) tea.Cmd {
 	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
+		if !kstmux.IsInside() {
 			return bailCompleteMsg{}
 		}
 
 		worktree, ok := m.modelToWorktree[modelName]
 		if !ok {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
 			return bailCompleteMsg{}
 		}
 
@@ -2156,13 +1748,13 @@ func nextCmd(m model, modelName string) tea.Cmd {
 			prov = m.currentProvider()
 			base = modelName
 		}
-		if err := incrementChoice(prov, base); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
+		if err := config.IncrementChoice(prov, base); err != nil {
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
 		}
 
 		cwd, err := os.Getwd()
 		if err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error: %s", err)})
 			return bailCompleteMsg{}
 		}
 		parentDir := filepath.Dir(cwd)
@@ -2179,36 +1771,36 @@ func nextCmd(m model, modelName string) tea.Cmd {
 
 		cmd := exec.Command("git", "-C", worktreePath, "add", ".")
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
 			return bailCompleteMsg{}
 		}
 
 		cmd = exec.Command("git", "-C", worktreePath, "commit", "-m", commitMessage)
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
 		}
 
 		featureBranch := strings.TrimSpace(m.branch)
 		cmd = exec.Command("git", "checkout", featureBranch)
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
 			return bailCompleteMsg{}
 		}
 
 		cmd = exec.Command("git", "merge", "--no-ff", worktree, "-m", fmt.Sprintf("Merge changes from %s", modelName))
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
 			return bailCompleteMsg{}
 		}
 
 		cmd = exec.Command("git", "push", "origin", featureBranch)
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
 		}
 
 		// Kill all panes opened by this session
 		for _, p := range m.createdPanes {
-			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", p})
+			_, _, _ = kstmux.RunCommand([]string{"kill-pane", "-t", p})
 		}
 
 		// Remove all worktrees and branches created by this session
@@ -2221,7 +1813,7 @@ func nextCmd(m model, modelName string) tea.Cmd {
 		}
 
 		msgText := fmt.Sprintf("Next complete: merged %s and cleaned up %d pane(s)", modelName, len(m.createdPanes))
-		_, _, _ = tmux.RunCmd([]string{"display-message", msgText})
+		_, _, _ = kstmux.RunCommand([]string{"display-message", msgText})
 
 		return nextCompleteMsg{Model: modelName, PaneID: "", Worktree: ""}
 	}
@@ -2229,13 +1821,13 @@ func nextCmd(m model, modelName string) tea.Cmd {
 
 func wrapCmd(m model, modelName string) tea.Cmd {
 	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
+		if !kstmux.IsInside() {
 			return bailCompleteMsg{}
 		}
 
 		worktree, ok := m.modelToWorktree[modelName]
 		if !ok {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error: model %s not found", modelName)})
 			return bailCompleteMsg{}
 		}
 
@@ -2246,13 +1838,13 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 			prov = m.currentProvider()
 			base = modelName
 		}
-		if err := incrementChoice(prov, base); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
+		if err := config.IncrementChoice(prov, base); err != nil {
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Warning: failed to update choice count: %s", err)})
 		}
 
 		cwd, err := os.Getwd()
 		if err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error: %s", err)})
 			return bailCompleteMsg{}
 		}
 		parentDir := filepath.Dir(cwd)
@@ -2269,37 +1861,37 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 
 		cmd := exec.Command("git", "-C", worktreePath, "add", ".")
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error adding files: %s", err)})
 			return bailCompleteMsg{}
 		}
 
 		cmd = exec.Command("git", "-C", worktreePath, "commit", "-m", commitMessage)
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error committing: %s", err)})
 		}
 
 		featureBranch := strings.TrimSpace(m.branch)
 		cmd = exec.Command("git", "checkout", featureBranch)
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error checking out feature branch: %s", err)})
 			return bailCompleteMsg{}
 		}
 
 		cmd = exec.Command("git", "merge", "--no-ff", worktree, "-m", fmt.Sprintf("Merge changes from %s", modelName))
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error merging: %s", err)})
 			return bailCompleteMsg{}
 		}
 
 		cmd = exec.Command("git", "push", "origin", featureBranch)
 		if err := cmd.Run(); err != nil {
-			tmux.RunCmd([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
+			kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Error pushing: %s", err)})
 		}
 
 		// Kill the pane associated with this model (if known)
 		paneID := m.modelToPaneID[modelName]
 		if paneID != "" {
-			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+			_, _, _ = kstmux.RunCommand([]string{"kill-pane", "-t", paneID})
 		}
 
 		// Also close any other panes opened by this session
@@ -2307,7 +1899,7 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 			if p == paneID {
 				continue
 			}
-			_, _, _ = tmux.RunCmd([]string{"kill-pane", "-t", p})
+			_, _, _ = kstmux.RunCommand([]string{"kill-pane", "-t", p})
 		}
 
 		// Remove this worktree/branch
@@ -2334,7 +1926,7 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 		if paneID == "" {
 			msgText = fmt.Sprintf("Wrap complete: merged %s (pane not found) and cleaned up %d worktree(s)", modelName, len(m.createdWorktrees))
 		}
-		_, _, _ = tmux.RunCmd([]string{"display-message", msgText})
+		_, _, _ = kstmux.RunCommand([]string{"display-message", msgText})
 
 		return wrapCompleteMsg{Model: modelName, PaneID: paneID, Worktree: worktree}
 
@@ -2343,7 +1935,7 @@ func wrapCmd(m model, modelName string) tea.Cmd {
 
 func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model) tea.Cmd {
 	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
+		if !kstmux.IsInside() {
 			return nil
 		}
 
@@ -2367,9 +1959,9 @@ func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model)
 		}
 		bashCmd := fmt.Sprintf("opencode run -m %s %s%s", shellQuote(modelFull), shellQuote(prompt), runPart)
 
-		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, "C-c"})
-		_, _, _ = tmux.RunCmd([]string{"send-keys", "-t", paneID, bashCmd, "Enter"})
-		_, _, _ = tmux.RunCmd([]string{"display-message", fmt.Sprintf("Sent to @%s: %s", modelName, prompt)})
+		_, _, _ = kstmux.RunCommand([]string{"send-keys", "-t", paneID, "C-c"})
+		_, _, _ = kstmux.RunCommand([]string{"send-keys", "-t", paneID, bashCmd, "Enter"})
+		_, _, _ = kstmux.RunCommand([]string{"display-message", fmt.Sprintf("Sent to @%s: %s", modelName, prompt)})
 
 		return nil
 	}
@@ -2377,12 +1969,12 @@ func sendToModelPaneCmd(paneID string, modelName string, prompt string, m model)
 
 func cleanupCmd(m model) tea.Cmd {
 	return func() tea.Msg {
-		if !tmux.IsInsideTmux() {
+		if !kstmux.IsInside() {
 			return cleanupCompleteMsg{}
 		}
 
 		for _, paneID := range m.createdPanes {
-			tmux.RunCmd([]string{"kill-pane", "-t", paneID})
+			kstmux.RunCommand([]string{"kill-pane", "-t", paneID})
 		}
 
 		cwd, err := os.Getwd()
@@ -2402,7 +1994,7 @@ func cleanupCmd(m model) tea.Cmd {
 		}
 
 		if len(m.createdPanes) > 0 || len(m.createdWorktrees) > 0 {
-			tmux.RunCmd([]string{"display-message", "Cleanup complete: closed panes, removed worktrees and branches"})
+			kstmux.RunCommand([]string{"display-message", "Cleanup complete: closed panes, removed worktrees and branches"})
 		}
 
 		return cleanupCompleteMsg{}
@@ -2567,12 +2159,12 @@ func (m model) View() string {
 			}
 			var b strings.Builder
 			pos := 0
-			for _, r := range tokenRangesInLine(s) {
-				if r.start > pos {
-					b.WriteString(s[pos:r.start])
+			for _, r := range editor.TokenRangesInLine(s) {
+				if r.Start > pos {
+					b.WriteString(s[pos:r.Start])
 				}
 				b.WriteString(pasteStyle.Render("[PASTED TEXT]"))
-				pos = r.end
+				pos = r.End
 			}
 			if pos < len(s) {
 				b.WriteString(s[pos:])
@@ -2586,7 +2178,7 @@ func (m model) View() string {
 				col = len(line)
 			}
 			// If cursor inside a token, render cursor as reverse on the placeholder
-			if start, end, _, ok := tokenRangeContaining(line, col); ok {
+			if start, end, _, ok := editor.TokenRangeContaining(line, col); ok {
 				left := renderLine(line[:start])
 				mid := pasteStyle.Render("[PASTED TEXT]")
 				if m.focus == focusPrompt && m.cursorVisible {
@@ -3823,7 +3415,7 @@ func main() {
 	flag.Parse()
 
 	// --run is optional; when omitted no extra command will be appended after the opencode call.
-	if !tmux.IsInsideTmux() {
+	if !kstmux.IsInside() {
 		// Ensure tmux binary exists before attempting to exec it so we can
 		// provide a clear error message if it's missing.
 		if _, err := exec.LookPath("tmux"); err != nil {
