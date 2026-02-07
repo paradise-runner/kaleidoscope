@@ -3,7 +3,7 @@
 ## Build/Test/Lint Commands
 - **Build**: `go build .`
 - **Run**: `go run main.go --run "echo 'hello world'"` (requires tmux)
-- **Test**: No test suite currently exists
+- **Test**: `go test ./...`
 - **Format**: `gofmt -w .`
 - **Vet**: `go vet ./...`
 
@@ -19,7 +19,14 @@
 - **Tmux Integration**: Use jubnzv/go-tmux library for pane management
 
 ## Architecture Notes
-- Single-file TUI application using Bubble Tea framework
+- Multi-package TUI application using Bubble Tea framework
+- Core logic in `main.go` with domain-specific packages in `internal/`:
+  - `internal/config/` - Configuration persistence (.kaleidoscope file)
+  - `internal/history/` - Per-repository message history persistence
+  - `internal/editor/` - Text editing helper functions (word/line navigation, paste handling)
+  - `internal/provider/` - AI provider and model definitions
+  - `internal/tmux/` - Tmux pane management helpers
+  - `internal/git/` - Git operation helpers (branch, worktree)
 - Three screen types: screenSetup, screenIteration, screenNewTask
 - State stored in model struct with focus-based input handling
 - Git worktrees isolate each model's workspace

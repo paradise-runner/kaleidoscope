@@ -133,11 +133,11 @@ func TestMoveWordRightLines(t *testing.T) {
 
 func TestDeleteWordBackward(t *testing.T) {
 	tests := []struct {
-		name        string
-		line        string
-		col         int
+		name         string
+		line         string
+		col          int
 		expectedLine string
-		expectedCol int
+		expectedCol  int
 	}{
 		{"delete word", "hello world", 5, " world", 0},
 		{"delete partial word", "hello world", 3, "lo world", 0},
@@ -211,11 +211,11 @@ func TestLineRight(t *testing.T) {
 
 func TestDeleteLineBackward(t *testing.T) {
 	tests := []struct {
-		name        string
-		line        string
-		col         int
+		name         string
+		line         string
+		col          int
 		expectedLine string
-		expectedCol int
+		expectedCol  int
 	}{
 		{"delete from middle", "hello world", 6, "world", 0},
 		{"delete all", "hello world", 11, "", 0},

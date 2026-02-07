@@ -35,7 +35,7 @@ func TestLoadSaveRoundTrip(t *testing.T) {
 	// Create test data
 	selected := map[string]map[string]int{
 		"openai": {
-			"gpt-4": 2,
+			"gpt-4":         2,
 			"gpt-3.5-turbo": 1,
 		},
 		"anthropic": {

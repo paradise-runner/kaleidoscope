@@ -115,12 +115,12 @@ func TestMigrationFromOldFormat(t *testing.T) {
 	// Create old format history file in current directory
 	oldHistory := []string{"Old prompt 1", "Old prompt 2"}
 	oldPath := filepath.Join(tmpDir, ".kaleidoscope_history.json")
-	
+
 	data, err := json.Marshal(oldHistory)
 	if err != nil {
 		t.Fatalf("Failed to marshal old history: %v", err)
 	}
-	
+
 	if err := os.WriteFile(oldPath, data, 0644); err != nil {
 		t.Fatalf("Failed to write old history file: %v", err)
 	}
